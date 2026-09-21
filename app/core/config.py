@@ -138,6 +138,10 @@ class Settings(BaseSettings):
     # Telegram (digest delivery + lightweight command bot)
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    # ALiSiO CRM: той самий бот, її чати лідів (docs/ALISIO.md).
+    # Секрет = значення CRM_TELEGRAM_WEBHOOK_SECRET з ALiSiO. Порожньо — не пересилаємо.
+    alisio_webhook_url: str = "https://alisio.rozum.one/api/webhooks/crm/telegram"
+    alisio_webhook_secret: str | None = None
     # Run Networking AI's OWN long-polling bot. Keep OFF when reusing the
     # Chater bot (two pollers on one token cause a 409 Conflict). Default: the
     # single-bot bridge — Chater pulls /api/digest/text and serves commands.

@@ -78,6 +78,9 @@ services:
       SYNC_AI_SENTIMENT: ${SYNC_AI_SENTIMENT:-true}
       BACKGROUND_AI: ${BACKGROUND_AI:-api}
       BACKGROUND_AI_FALLBACK: ${BACKGROUND_AI_FALLBACK:-api}
+      # ALiSiO CRM: business_message спершу летить їй; handled>0 — чат її.
+      ALISIO_WEBHOOK_URL: ${ALISIO_WEBHOOK_URL:-https://alisio.rozum.one/api/webhooks/crm/telegram}
+      ALISIO_WEBHOOK_SECRET: ${ALISIO_WEBHOOK_SECRET:-}
 
   # Фоновий AI на підписці: Claude Code CLI бере задачі з черги ai_jobs і
   # працює через наш MCP. Без CLAUDE_CODE_OAUTH_TOKEN просто спить.

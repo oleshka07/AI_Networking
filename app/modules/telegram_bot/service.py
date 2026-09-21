@@ -212,6 +212,43 @@ def is_closer(text: str) -> bool:
 # ── Draft lifecycle ──────────────────────────────────────────────────────────
 
 
+def log_incoming(
+    db: Session,
+    *,
+    chat_id: int,
+    text: str,
+    message_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+) -> tuple[Contact, bool]:
+    """Контакт + вхідна взаємодія в історії (ідемпотентно за id повідомлення).
+
+    Окремо від чернеток, бо для чатів, які веде ALiSiO, нам потрібна лише
+    памʼять, без жодної відповіді.
+    """
+    contact, is_new = find_or_create_contact(
+        db, chat_id, first_name, last_name, username
+    )
+    external_id = f"tgb:{chat_id}:{message_id}"
+    if not interactions_service.interaction_exists(db, contact.id, external_id):
+        interactions_service.add_synced_interaction(
+            db,
+            contact,
+            occurred_at=datetime.now(timezone.utc),
+            channel=Channel.message,
+            direction=Direction.inbound,
+            summary=text[:300],
+            source="telegram",
+            external_id=external_id,
+        )
+        db.refresh(contact)
+        warmth.refresh(contact)
+        db.commit()
+    db.refresh(contact)
+    return contact, is_new
+
+
 def handle_incoming(
     db: Session,
     *,
@@ -229,27 +266,10 @@ def handle_incoming(
     "drafted" (a reply is ready), "closer"/"skip" (logged, no reply needed),
     "paused" (auto-reply off for this contact — logged; ``draft`` is a held,
     text-less draft the user can fill on demand)."""
-    contact, is_new = find_or_create_contact(
-        db, chat_id, first_name, last_name, username
+    contact, is_new = log_incoming(
+        db, chat_id=chat_id, text=text, message_id=message_id,
+        first_name=first_name, last_name=last_name, username=username,
     )
-
-    external_id = f"tgb:{chat_id}:{message_id}"
-    if not interactions_service.interaction_exists(db, contact.id, external_id):
-        interactions_service.add_synced_interaction(
-            db,
-            contact,
-            occurred_at=datetime.now(timezone.utc),
-            channel=Channel.message,
-            direction=Direction.inbound,
-            summary=text[:300],
-            source="telegram",
-            external_id=external_id,
-        )
-        db.refresh(contact)
-        warmth.refresh(contact)
-        db.commit()
-
-    db.refresh(contact)
 
     # Conversation closers ("ок, дякую", "все, пока") need no reply — a
     # drafted answer to a goodbye creates infinite politeness loops.

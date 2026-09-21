@@ -332,7 +332,8 @@ def handle_business_connection(client, bc: dict) -> None:
     logger.info("Business connection updated: %s", bc.get("id"))
 
 
-def handle_business_message(client, msg: dict) -> None:
+def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) -> None:
+    """``alisio_handled`` — чат веде ALiSiO: лише памʼять, жодних чернеток і карток."""
     admin = _admin_id()
     chat = msg.get("chat") or {}
     sender = msg.get("from") or {}
@@ -385,6 +386,21 @@ def handle_business_message(client, msg: dict) -> None:
             from app.modules.automation import reminders as _reminders
 
             _reminders.complete_for_contact(db, contact.id)
+        return
+
+    if alisio_handled:
+        # Чат ліда ALiSiO: вона відповість сама. Ми лише пишемо в історію,
+        # щоб памʼять про людину не мала дірки.
+        with SessionLocal() as db:
+            service.log_incoming(
+                db,
+                chat_id=chat_id,
+                text=text,
+                message_id=msg.get("message_id") or 0,
+                first_name=sender.get("first_name") or chat.get("first_name") or "Unknown",
+                last_name=sender.get("last_name") or chat.get("last_name"),
+                username=sender.get("username") or chat.get("username"),
+            )
         return
 
     with SessionLocal() as db:
@@ -2630,7 +2646,13 @@ def dispatch(client, update: dict) -> None:
         if "business_connection" in update:
             handle_business_connection(client, update["business_connection"])
         elif "business_message" in update:
-            handle_business_message(client, update["business_message"])
+            # Спершу питаємо ALiSiO, чи це її лід — до будь-якої власної відповіді.
+            from app.modules.integrations import alisio
+
+            handled = alisio.forward_update(update)
+            handle_business_message(
+                client, update["business_message"], alisio_handled=handled > 0
+            )
         elif "callback_query" in update:
             handle_callback(client, update["callback_query"])
         elif "message" in update or "edited_message" in update:
