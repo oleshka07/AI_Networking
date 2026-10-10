@@ -6,9 +6,11 @@ Telegram Business дає підключити лише одного чат-бо�
 - ``business_connection`` — щоб Holos знав id підключення. Сторіс у профіль Holos ставить сам нашим
   токеном (``postStory``); надсилати з двох систем одним токеном Telegram дозволяє, обмеження лише на
   одне місце для оновлень, і воно в нас.
-- текст ВЛАСНИХ повідомлень власника в бізнес-чатах — для ідей постів. Повідомлення співрозмовників
-  не шлемо зовсім (а Holos їх і відкидає), імен і юзернеймів співрозмовника теж: лише id чату, з якого
-  Holos робить відбиток для дедуплікації.
+- текст ВЛАСНИХ повідомлень власника в бізнес-чатах — для ідей постів;
+- текст повідомлень КЛІЄНТІВ — лише коли власник у Holos увімкнув «👥 і питання клієнтів». Про це Holos
+  каже в кожній відповіді (``"clients": true``), і ми пам'ятаємо останнє, що він сказав: без цього
+  клієнтів не шлемо зовсім. Holos ще й сам відкидає їх, якщо галочку зняли, а знеособлює до збереження.
+  Імен і юзернеймів співрозмовника не шлемо ніколи: лише id чату, з якого Holos робить відбиток.
 
 Пересилаємо у фоновому потоці: відповідь людям не чекає Holos. Таймаут 5 с, без повторів: Holos
 дедуплікує за id повідомлення, а підключення ми ще раз шлемо на кожному старті бота.
@@ -31,6 +33,9 @@ from app.core.config import settings
 logger = logging.getLogger("networking.holos")
 
 TIMEOUT_SECONDS = 5.0
+
+# Чи хоче Holos повідомлення клієнтів: останнє, що він відповів (на старті — відповідь на підключення).
+_want_clients = False
 
 
 def configured() -> bool:
@@ -64,12 +69,20 @@ def _post(update: dict) -> str:
     if resp.status_code != 200:
         logger.warning("holos: HTTP %s (%s)", resp.status_code, kind)
         return f"http {resp.status_code}"
+    global _want_clients
     try:
-        did = str((resp.json() or {}).get("did") or "ok")
-    except ValueError:
+        body = resp.json() or {}
+        did = str(body.get("did") or "ok")
+        if "clients" in body:
+            _want_clients = body.get("clients") is True
+    except (ValueError, AttributeError):
         did = "ok"
     logger.info("holos: %s -> %s", kind, did)
     return did
+
+
+def wants_clients() -> bool:
+    return configured() and _want_clients
 
 
 def _spawn(fn, *args) -> None:
@@ -84,8 +97,8 @@ def forward_connection(bc: dict) -> None:
     _spawn(_post, {"business_connection": bc})
 
 
-def own_message_update(msg: dict, text: str) -> dict:
-    """Мінімум для Holos: чиє підключення, id повідомлення, хто написав (власник), id чату й текст.
+def message_update(msg: dict, text: str) -> dict:
+    """Мінімум для Holos: чиє підключення, id повідомлення, хто написав (лише id), id чату й текст.
     Без імен, юзернеймів і фото співрозмовника."""
     return {
         "business_message": {
@@ -99,11 +112,24 @@ def own_message_update(msg: dict, text: str) -> dict:
     }
 
 
+own_message_update = message_update  # стара назва (тести, документація)
+
+# голосове без розшифровки: тексту нема — нема й що пересилати
+_NO_TEXT = ("[голосове повідомлення]",)
+
+
 def forward_own_message(msg: dict, text: str) -> None:
     """Повідомлення, яке написав САМ власник. Порожнє чи без підключення — не шлемо."""
-    if not configured() or not text or not msg.get("business_connection_id"):
+    if not configured() or not text or text in _NO_TEXT or not msg.get("business_connection_id"):
         return
-    _spawn(_post, own_message_update(msg, text))
+    _spawn(_post, message_update(msg, text))
+
+
+def forward_client_message(msg: dict, text: str) -> None:
+    """Повідомлення клієнта — лише коли Holos сам сказав, що хоче їх (галочка «👥 і питання клієнтів»)."""
+    if not wants_clients() or not text or text in _NO_TEXT or not msg.get("business_connection_id"):
+        return
+    _spawn(_post, message_update(msg, text))
 
 
 def sync_connections(client) -> int:

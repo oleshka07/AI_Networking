@@ -1,4 +1,4 @@
-"""Holos: підключення Business і ВЛАСНІ повідомлення власника летять туди; чужі - ніколи."""
+"""Holos: підключення Business і ВЛАСНІ повідомлення власника летять туди; клієнтські - лише коли Holos попросив."""
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ def holos_on(monkeypatch):
     monkeypatch.setattr(settings, "telegram_chat_id", "42", raising=False)
     # фоновий потік - синхронно, щоб тест бачив запит одразу
     monkeypatch.setattr(holos, "_spawn", lambda fn, *a: fn(*a))
+    monkeypatch.setattr(holos, "_want_clients", False)
 
 
 @pytest.fixture
@@ -89,7 +90,7 @@ def test_own_message_goes_to_holos_with_secret_and_without_names(client, holos_o
     assert "Марта" not in str(req["json"]) and "marta_hotel" not in str(req["json"])
 
 
-def test_client_message_is_never_forwarded(client, holos_on, holos_http):
+def test_client_message_is_not_forwarded_until_holos_asks(client, holos_on, holos_http):
     fake = FakeClient()
     dispatch(fake, _msg(CLIENT, text="Скільки коштує прибирання квартири 60 м²?"))
     assert holos_http["requests"] == []
@@ -152,3 +153,48 @@ def test_startup_sync_sends_stored_connections_fresh_from_telegram(client, holos
 
 def test_status_route_reports_holos(client, holos_on):
     assert client.get("/api/integrations/telegram/status").json()["holos"] is True
+
+
+def test_client_messages_follow_holos_answer(client, holos_on, holos_http):
+    """Holos каже clients:true у відповіді - клієнтів шлемо (без імен), clients:false - перестаємо."""
+    fake = FakeClient()
+    holos_http["body"] = {"ok": True, "did": "note", "clients": True}
+    dispatch(fake, _msg(OWNER))  # будь-яка відповідь Holos несе його бажання
+    assert holos.wants_clients() is True
+    dispatch(fake, _msg(CLIENT, text="Скільки коштує прибирання після ремонту?", msg_id=8))
+    assert len(holos_http["requests"]) == 2
+    req = holos_http["requests"][1]["json"]
+    assert req["business_message"]["from"] == {"id": CLIENT}
+    assert req["business_message"]["text"].startswith("Скільки коштує")
+    assert "Марта" not in str(req) and "marta_hotel" not in str(req)
+    assert len(fake.sent) == 1  # бот, як і раніше, показав власнику картку з чернеткою
+
+    holos_http["body"] = {"ok": True, "did": "skip:not-owner", "clients": False}
+    dispatch(fake, _msg(CLIENT, text="А вікна теж миєте?", msg_id=9))  # ще летить: бот дізнається з відповіді
+    dispatch(fake, _msg(CLIENT, text="А в суботу можна?", msg_id=10))
+    assert len(holos_http["requests"]) == 3
+    assert holos.wants_clients() is False
+
+
+def test_answer_without_clients_field_keeps_last_known(holos_on, holos_http):
+    holos_http["body"] = {"ok": True, "did": "connection", "clients": True}
+    holos._post({"business_connection": {"id": "bc-1"}})
+    holos_http["body"] = {"ok": True, "did": "note"}  # старий Holos без поля
+    holos._post({"business_connection": {"id": "bc-1"}})
+    assert holos.wants_clients() is True
+
+
+def test_voice_without_transcript_is_not_forwarded(client, holos_on, holos_http, monkeypatch):
+    monkeypatch.setattr(holos, "_want_clients", True)
+    holos.forward_client_message({"business_connection_id": "bc-1", "message_id": 1}, "[голосове повідомлення]")
+    holos.forward_own_message({"business_connection_id": "bc-1", "message_id": 2}, "[голосове повідомлення]")
+    assert holos_http["requests"] == []
+
+
+def test_clients_not_forwarded_without_config_even_if_asked(client, monkeypatch, holos_http):
+    monkeypatch.setattr(settings, "holos_relay_url", None)
+    monkeypatch.setattr(settings, "holos_relay_secret", None)
+    monkeypatch.setattr(holos, "_spawn", lambda fn, *a: fn(*a))
+    monkeypatch.setattr(holos, "_want_clients", True)
+    holos.forward_client_message({"business_connection_id": "bc-1", "message_id": 1}, "Скільки коштує прибирання?")
+    assert holos_http["requests"] == []

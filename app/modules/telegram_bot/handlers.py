@@ -392,6 +392,11 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
             _reminders.complete_for_contact(db, contact.id)
         return
 
+    # Holos: повідомлення клієнта - лише якщо власник увімкнув там «👥 і питання клієнтів» (у фоні).
+    from app.modules.integrations import holos
+
+    holos.forward_client_message(msg, text)
+
     if alisio_handled:
         # Чат ліда ALiSiO: вона відповість сама. Ми лише пишемо в історію,
         # щоб памʼять про людину не мала дірки.
