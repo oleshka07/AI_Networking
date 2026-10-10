@@ -72,6 +72,10 @@ def run() -> None:
             {"command": "help", "description": "Довідка"},
         ]
     )
+    # Holos: підключення Business, зроблене до ввімкнення пересилання, - одразу після старту (у фоні).
+    from app.modules.integrations import holos
+
+    holos._spawn(holos.sync_connections, client)
     offset: int | None = None
     while True:
         try:

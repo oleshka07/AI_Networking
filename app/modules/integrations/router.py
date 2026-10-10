@@ -95,7 +95,7 @@ def chater_dedupe(db: Session = Depends(get_db)):
 
 @router.get("/telegram/status")
 def telegram_status():
-    from app.modules.integrations import alisio
+    from app.modules.integrations import alisio, holos
     from app.modules.telegram_bot import transcribe
 
     return {
@@ -103,6 +103,8 @@ def telegram_status():
         "chat_id_set": bool(settings.telegram_chat_id),
         # ALiSiO CRM веде чати своїх лідів тим самим ботом.
         "alisio": alisio.configured(),
+        # Holos: сторіс у профіль і ідеї з власних повідомлень (тим самим ботом).
+        "holos": holos.configured(),
         # Розшифровка голосових: хто перший і хто в запасі.
         "voice_provider": transcribe.active_provider(),
         "voice_providers": transcribe.available_providers(),

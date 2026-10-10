@@ -1261,6 +1261,9 @@ function renderTelegramPanel(st) {
     <p class="muted">ALiSiO CRM: ${st.alisio
       ? "підключено — у чатах її лідів бот мовчить, відповідає ALiSiO"
       : "не підключено — додай <code>ALISIO_WEBHOOK_SECRET</code> у .env"}</p>
+    <p class="muted">Holos: ${st.holos
+      ? "підключено — сторіс у профіль ставить Holos цим ботом, твої власні повідомлення йдуть туди для ідей постів"
+      : "не підключено — <code>HOLOS_RELAY_URL</code> і <code>HOLOS_RELAY_SECRET</code> з кабінету Holos у .env"}</p>
     <button class="btn primary" id="tg-test">Send test message</button>
     <div id="tg-result" class="mt"></div>`;
   $("#tg-test").addEventListener("click", async (e) => {

@@ -353,6 +353,10 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
     # The user's own messages (typed on their phone) also arrive here —
     # log them as outgoing history, never draft a reply to yourself.
     if sender.get("id") is not None and sender.get("id") != chat_id:
+        # Holos: лише СВОЇ повідомлення (не співрозмовника) - для ідей постів, у фоні.
+        from app.modules.integrations import holos
+
+        holos.forward_own_message(msg, text)
         with SessionLocal() as db:
             contact, _ = service.find_or_create_contact(
                 db,
@@ -2645,6 +2649,10 @@ def dispatch(client, update: dict) -> None:
     try:
         if "business_connection" in update:
             handle_business_connection(client, update["business_connection"])
+            # Holos ставить сторіс у профіль нашим токеном - йому треба знати підключення.
+            from app.modules.integrations import holos
+
+            holos.forward_connection(update["business_connection"])
         elif "business_message" in update:
             # Спершу питаємо ALiSiO, чи це її лід — до будь-якої власної відповіді.
             from app.modules.integrations import alisio

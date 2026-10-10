@@ -81,6 +81,9 @@ services:
       # ALiSiO CRM: business_message спершу летить їй; handled>0 — чат її.
       ALISIO_WEBHOOK_URL: ${ALISIO_WEBHOOK_URL:-https://alisio.rozum.one/api/webhooks/crm/telegram}
       ALISIO_WEBHOOK_SECRET: ${ALISIO_WEBHOOK_SECRET:-}
+      # Holos: підключення Business і власні повідомлення власника (для сторіс і ідей постів).
+      HOLOS_RELAY_URL: ${HOLOS_RELAY_URL:-}
+      HOLOS_RELAY_SECRET: ${HOLOS_RELAY_SECRET:-}
 
   # Фоновий AI на підписці: Claude Code CLI бере задачі з черги ai_jobs і
   # працює через наш MCP. Без CLAUDE_CODE_OAUTH_TOKEN просто спить.

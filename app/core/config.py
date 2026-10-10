@@ -142,6 +142,10 @@ class Settings(BaseSettings):
     # Секрет = значення CRM_TELEGRAM_WEBHOOK_SECRET з ALiSiO. Порожньо — не пересилаємо.
     alisio_webhook_url: str = "https://alisio.rozum.one/api/webhooks/crm/telegram"
     alisio_webhook_secret: str | None = None
+    # Holos: той самий бот ставить сторіс у профіль і дає ідеї з власних повідомлень (docs/HOLOS.md).
+    # Обидва значення - з кабінету Holos (Канали → Telegram → «Свій бот»). Порожньо - не пересилаємо.
+    holos_relay_url: str | None = None
+    holos_relay_secret: str | None = None
     # Run Networking AI's OWN long-polling bot. Keep OFF when reusing the
     # Chater bot (two pollers on one token cause a 409 Conflict). Default: the
     # single-bot bridge — Chater pulls /api/digest/text and serves commands.
