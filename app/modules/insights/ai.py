@@ -462,6 +462,35 @@ _INTAKE_SCHEMA = {
 }
 
 
+def draft_request(contact: models.Contact, what: str) -> str | None:
+    """Прохання до людини від імені власника («попроси Марію надіслати рахунок»).
+
+    Іде лише чернеткою з кнопкою «Надіслати» — сама система нічого не шле.
+    ``None`` без моделі: тоді бот бере простий шаблон."""
+    if not llm.enabled() or not (what or "").strip():
+        return None
+    system = (
+        "Ти пишеш коротке прохання в Telegram ВІД ІМЕНІ Степана до людини з "
+        "його мережі. Пиши, як він сам — його лексикою й тоном з історії.\n"
+        "ПРАВИЛА (суворо):\n"
+        "1) Мова: тією ж, якою ви листувалися з цією людиною.\n"
+        "2) БЕЗ емодзі та смайликів.\n"
+        "3) 1–2 речення: саме прохання і строк, якщо він названий. Без лестощів "
+        "і зайвих вибачень.\n"
+        "4) Верни ЛИШЕ текст повідомлення, без лапок і пояснень."
+    )
+    style = _style_context(contact)
+    prompt = (
+        f"{_contact_context(contact)}\n\n"
+        + (f"{style}\n\n" if style else "")
+        + f"Історія листування:\n{_dialogue_history(contact)}\n\n"
+        f"Що попросити: {what.strip()}\n\n"
+        f"Напиши прохання від Степана до {contact.first_name}."
+    )
+    raw = llm.text(system, prompt, max_tokens=300)
+    return _clean(_strip_emoji(raw)) if raw else None
+
+
 def parse_voice_intake(text: str) -> dict | None:
     """Turn a dictated note into structured contact data. None when AI is
     off or nothing useful was extracted."""
