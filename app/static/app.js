@@ -730,60 +730,220 @@ function taskMeta(t) {
   return bits.join(" · ");
 }
 
+const TASK_SOURCES = {
+  claude: "Claude", telegram: "Telegram", calendar: "Календар", gate: "Ворота",
+  email: "Пошта", focus: "ПК", bot: "Бот",
+};
+const TASK_KINDS = { duty: "я винен", expectation: "чекаю" };
+state.taskFilter = state.taskFilter || { blocks: false, today: false, overdue: false, source: "" };
+
+const todayIso = () => new Date().toLocaleDateString("sv-SE");  // YYYY-MM-DD, локальна дата
+
+function tomorrowNine() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(9, 0, 0, 0);
+  return d.toISOString();
+}
+
+function isSnoozed(t) {
+  return t.snoozed_until && new Date(t.snoozed_until) > new Date();
+}
+
+function sourcePill(t) {
+  const label = TASK_SOURCES[t.source];
+  const linked = t.linked_ref && t.linked_ref.startsWith("claude:") && t.source !== "claude"
+    ? ' <span class="pill">↔ Claude</span>' : "";
+  return (label ? `<span class="pill">${esc(label)}</span>` : "") + linked;
+}
+
+function taskBadges(t) {
+  const bits = [];
+  if (t.blocks_work) bits.push('<span class="pill" style="border-color:#f87171;color:#f87171">тримає роботу</span>');
+  if (TASK_KINDS[t.kind]) bits.push(`<span class="pill">${TASK_KINDS[t.kind]}</span>`);
+  if (isSnoozed(t)) bits.push(`<span class="pill">⏰ до ${new Date(t.snoozed_until).toLocaleString("uk-UA",
+    { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>`);
+  if (t.counterpart) bits.push(`<span class="muted">${esc(t.counterpart)}</span>`);
+  return bits.join(" ");
+}
+
+function taskPassesFilter(t, f) {
+  const today = todayIso();
+  if (f.blocks && !t.blocks_work) return false;
+  if (f.today && t.due_date !== today) return false;
+  if (f.overdue && !(t.due_date && t.due_date < today)) return false;
+  if (f.source) {
+    const linked = (t.linked_ref || "").split(":")[0];
+    if (t.source !== f.source && linked !== f.source) return false;
+  }
+  return true;
+}
+
+function taskActions(t) {
+  const card = t.external_url && /^https?:\/\//.test(t.external_url)
+    ? `<a class="btn small" href="${esc(t.external_url)}" target="_blank" rel="noopener">Картка</a>` : "";
+  return `<div class="flex" style="gap:6px;flex-wrap:wrap">
+      ${card}
+      <button class="btn small" data-cur="${t.id}" title="Взяв у роботу">▶</button>
+      <button class="btn small" data-done="${t.id}" title="Готово">✓</button>
+      <button class="btn small" data-snooze="${t.id}" title="Нагадати завтра о 09:00">⏰</button>
+      <button class="btn small" data-edit="${t.id}">Edit</button>
+      <button class="btn small danger" data-del="${t.id}">✕</button>
+    </div>`;
+}
+
+function syncPanel(cfg) {
+  const s = cfg && cfg.sync;
+  if (!s) return "";
+  const when = s.last_at ? new Date(s.last_at).toLocaleString("uk-UA") : "ще не звертався";
+  const err = s.error
+    ? `<div style="color:#f87171">Остання помилка${s.error_at ? " (" + new Date(s.error_at).toLocaleString("uk-UA") + ")" : ""}: ${esc(s.error)}</div>`
+    : "";
+  return `<div class="card mb">
+    <div class="flex between"><strong>Синк з чек-листом Claude</strong>
+      <span class="muted">${s.last_tool ? esc(s.last_tool) + " · " : ""}${esc(when)}</span></div>
+    <div class="muted">Задач із чек-листа: відкрито <b>${s.open}</b> · закрито <b>${s.closed}</b>.
+      Кроки й тексти — у картках, сюди приходять назва й посилання.</div>${err}
+  </div>`;
+}
+
 async function renderTasks() {
   const main = $("#main");
   main.innerHTML = `<div class="view-head"><h2>Tasks</h2>
-    <button class="btn primary" id="new-task">+ Нова задача</button></div>
+    <div class="flex" style="gap:8px">
+      <button class="btn" id="task-reminders">Нагадування</button>
+      <button class="btn primary" id="new-task">+ Нова задача</button>
+    </div></div>
     <div class="empty"><span class="spinner"></span> Loading…</div>`;
   $("#new-task").addEventListener("click", () => openTaskForm());
-  let tasks;
-  try { tasks = await api("/tasks"); } catch (e) { return showError(e); }
+  $("#task-reminders").addEventListener("click", openReminderSettings);
+  let all, cfg;
+  try {
+    [all, cfg] = await Promise.all([api("/tasks?kind=all"), api("/tasks/settings").catch(() => null)]);
+  } catch (e) { return showError(e); }
 
-  // Список уже впорядкований сервером: статус → дата → тривалість.
-  const now = tasks[0];
+  const f = state.taskFilter;
+  const tasks = all.filter((t) => taskPassesFilter(t, f));
+  const sources = [...new Set(all.map((t) => t.source).filter((x) => TASK_SOURCES[x]))];
+  const chip = (key, label) =>
+    `<button class="btn small${f[key] ? " primary" : ""}" data-filter="${key}">${label}</button>`;
+  const filters = `<div class="flex mb" style="gap:6px;flex-wrap:wrap;align-items:center">
+      ${chip("blocks", "Тримає роботу")}${chip("today", "Сьогодні")}${chip("overdue", "Прострочені")}
+      <select id="task-source"><option value="">усі джерела</option>${sources.map((x) =>
+        `<option value="${x}"${f.source === x ? " selected" : ""}>${esc(TASK_SOURCES[x])}</option>`).join("")}</select>
+      <span class="muted">${tasks.length} з ${all.length}</span>
+    </div>`;
+
+  // Список уже впорядкований сервером: тримає роботу → статус → дата → тривалість.
+  const now = tasks.find((t) => !isSnoozed(t));
   const hero = now ? `<div class="card mb" style="border-left:3px solid var(--accent, #5eead4)">
       <div class="muted" style="font-size:11px;letter-spacing:.08em">ЗАРАЗ</div>
-      <h3 class="section-title" style="margin:4px 0">${esc(now.title)}</h3>
-      <div class="muted">${esc(taskMeta(now))}</div>
+      <h3 class="section-title" style="margin:4px 0">${esc(now.title)} ${sourcePill(now)}</h3>
+      <div class="muted">${esc(taskMeta(now))} ${taskBadges(now)}</div>
       <div class="flex mt" style="gap:6px">
         <button class="btn small" data-done="${now.id}">✓ Готово</button>
         <button class="btn small" data-cur="${now.id}">▶ Взяв у роботу</button>
+        <button class="btn small" data-snooze="${now.id}">⏰ Завтра</button>
+        ${now.external_url ? `<a class="btn small" href="${esc(now.external_url)}" target="_blank" rel="noopener">Картка</a>` : ""}
       </div>
     </div>` : "";
 
-  const rest = tasks.slice(1).map((t) => `
-    <div class="card mb">
-      <div class="flex between">
-        <div><strong>${esc(t.title)}</strong>
-          <div class="muted">${esc(taskMeta(t))}</div></div>
-        <div class="flex" style="gap:6px">
-          <button class="btn small" data-cur="${t.id}">▶</button>
-          <button class="btn small" data-done="${t.id}">✓</button>
-          <button class="btn small" data-edit="${t.id}">Edit</button>
-          <button class="btn small danger" data-del="${t.id}">✕</button>
-        </div>
+  // Групи за проєктом; порядок груп — за першою задачею, тож нагорі те, що горить.
+  const groups = new Map();
+  tasks.filter((t) => t !== now).forEach((t) => {
+    const key = t.project || "Без проєкту";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
+  });
+  const openIn = (name) => all.filter((t) => (t.project || "Без проєкту") === name).length;
+  const grouped = [...groups.entries()].map(([name, rows]) => `
+    <h3 class="section-title mt">${esc(name)} <span class="muted">· відкрито ${openIn(name)}</span></h3>
+    ${rows.map((t) => `<div class="card mb"${isSnoozed(t) ? ' style="opacity:.6"' : ""}>
+      <div class="flex between" style="gap:12px">
+        <div><strong>${esc(t.title)}</strong> ${sourcePill(t)}
+          <div class="muted">${esc(taskMeta(t))} ${taskBadges(t)}</div></div>
+        ${taskActions(t)}
       </div>
-    </div>`).join("");
+    </div>`).join("")}`).join("");
 
-  main.querySelector(".empty").outerHTML = tasks.length
-    ? hero + rest
-    : `<div class="empty">Задач немає. Додай першу — або вони приїдуть із focus.md на ПК.</div>`;
+  main.querySelector(".empty").outerHTML = syncPanel(cfg) + filters + (tasks.length
+    ? hero + grouped
+    : `<div class="empty">${all.length ? "Під фільтр нічого не підпадає."
+        : "Задач немає. Додай першу — або вони приїдуть із focus.md, Telegram чи чек-листа Claude."}</div>`);
 
-  const patch = async (id, body) => {
-    try { await api(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(body) }); renderTasks(); }
-    catch (e) { toast(e.message, true); }
+  main.querySelectorAll("[data-filter]").forEach((b) => b.addEventListener("click", () => {
+    f[b.dataset.filter] = !f[b.dataset.filter]; renderTasks();
+  }));
+  $("#task-source").addEventListener("change", (e) => { f.source = e.target.value; renderTasks(); });
+
+  const patch = async (id, body, note) => {
+    try {
+      await api(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      if (note) toast(note);
+      renderTasks();
+    } catch (e) { toast(e.message, true); }
   };
   main.querySelectorAll("[data-done]").forEach((b) =>
     b.addEventListener("click", () => patch(b.dataset.done, { status: "done" })));
   main.querySelectorAll("[data-cur]").forEach((b) =>
     b.addEventListener("click", () => patch(b.dataset.cur, { status: "current" })));
+  main.querySelectorAll("[data-snooze]").forEach((b) =>
+    b.addEventListener("click", () => patch(b.dataset.snooze, { snoozed_until: tomorrowNine() },
+      "Нагадаю завтра о 09:00")));
   main.querySelectorAll("[data-edit]").forEach((b) =>
-    b.addEventListener("click", () => openTaskForm(tasks.find((t) => t.id === Number(b.dataset.edit)))));
+    b.addEventListener("click", () => openTaskForm(all.find((t) => t.id === Number(b.dataset.edit)))));
   main.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirm("Видалити задачу?")) return;
     try { await api(`/tasks/${b.dataset.del}`, { method: "DELETE" }); renderTasks(); }
     catch (e) { toast(e.message, true); }
   }));
+}
+
+async function openReminderSettings() {
+  let cfg;
+  try { cfg = await api("/tasks/settings"); } catch (e) { return toast(e.message, true); }
+  const hours = (name, value, from = 0, to = 23) => `<select name="${name}">${
+    Array.from({ length: to - from + 1 }, (_, i) => i + from).map((h) =>
+      goalOpt(String(h), `${String(h).padStart(2, "0")}:00`, String(value))).join("")}</select>`;
+  const check = (name, label) =>
+    `<label class="form-full"><input type="checkbox" name="${name}" ${cfg[name] ? "checked" : ""} /> ${label}</label>`;
+  const modes = { suggest: "пропонувати кнопкою", auto: "створювати самому", off: "вимкнено" };
+  openModal(`<h3>Нагадування про задачі</h3>
+    <form id="rem-form"><div class="form-grid">
+      ${check("enabled", "Нагадування увімкнено")}
+      ${check("plan_enabled", "Ранковий план у щоденному прогоні: до 3 задач і зустрічі дня")}
+      ${check("blockers_enabled", "Пінг про задачі, що тримають роботу понад добу")}
+      <label>не частіше, ніж раз на (год)<input type="number" name="blocker_every_hours" min="1" max="72" value="${cfg.blocker_every_hours}" /></label>
+      <label>лише з ${hours("blocker_from_hour", cfg.blocker_from_hour)}</label>
+      <label>до ${hours("blocker_to_hour", cfg.blocker_to_hour, 1, 24)}</label>
+      ${check("deadlines_enabled", "Строки сьогодні й прострочені — у денній звірці")}
+      ${check("prep_enabled", "Підготовка до завтрашніх зустрічей")}
+      <label>о котрій ${hours("prep_hour", cfg.prep_hour)}</label>
+      <label>Тиша з<input name="quiet_from" pattern="[0-2][0-9]:[0-5][0-9]" value="${esc(cfg.quiet_from)}" /></label>
+      <label>до<input name="quiet_to" pattern="[0-2][0-9]:[0-5][0-9]" value="${esc(cfg.quiet_to)}" /></label>
+      <label>Не більше повідомлень на день<input type="number" name="daily_cap" min="0" max="50" value="${cfg.daily_cap}" /></label>
+      <label class="form-full">Задачі з переписки в Telegram<select name="tg_suggest_mode">${
+        Object.entries(modes).map(([k, v]) => goalOpt(k, v, cfg.tg_suggest_mode)).join("")}</select></label>
+    </div>
+    <div class="modal-actions"><button type="button" class="btn" id="m-cancel">Скасувати</button>
+      <button type="submit" class="btn primary">Зберегти</button></div></form>`);
+  $("#m-cancel").addEventListener("click", closeModal);
+  $("#rem-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = {};
+    ["enabled", "plan_enabled", "blockers_enabled", "deadlines_enabled", "prep_enabled"]
+      .forEach((k) => (body[k] = fd.get(k) === "on"));
+    ["blocker_every_hours", "blocker_from_hour", "blocker_to_hour", "prep_hour", "daily_cap"]
+      .forEach((k) => (body[k] = parseInt(fd.get(k), 10)));
+    body.quiet_from = fd.get("quiet_from");
+    body.quiet_to = fd.get("quiet_to");
+    body.tg_suggest_mode = fd.get("tg_suggest_mode");
+    try {
+      await api("/tasks/settings", { method: "PATCH", body: JSON.stringify(body) });
+      closeModal(); toast("Збережено");
+    } catch (err) { toast(err.message, true); }
+  });
 }
 
 function openTaskForm(t = null) {
@@ -798,6 +958,8 @@ function openTaskForm(t = null) {
         value="${t?.duration_min || ""}" /></label>
       <label>Дедлайн<input name="due_date" type="date" value="${t?.due_date || ""}" /></label>
       <label>Теги (через кому)<input name="tags" value="${esc(t?.tags || "")}" /></label>
+      <label><input type="checkbox" name="blocks_work" ${t?.blocks_work ? "checked" : ""} />
+        Тримає роботу (іде першою, нагадую, якщо висить понад добу)</label>
       <div class="flex mt" style="gap:8px">
         <button class="btn primary" type="submit">Зберегти</button>
         <button class="btn" type="button" id="task-cancel">Скасувати</button>
@@ -810,6 +972,7 @@ function openTaskForm(t = null) {
     const body = {};
     for (const [k, v] of f.entries()) body[k] = v === "" ? null : v;
     if (body.duration_min) body.duration_min = Number(body.duration_min);
+    body.blocks_work = f.get("blocks_work") === "on";
     try {
       if (t) await api(`/tasks/${t.id}`, { method: "PATCH", body: JSON.stringify(body) });
       else await api("/tasks", { method: "POST", body: JSON.stringify(body) });

@@ -33,14 +33,24 @@ def _task_or_404(db: Session, task_id: int):
 @router.get("", response_model=list[TaskOut])
 def list_tasks(
     include_done: bool = Query(default=False),
-    kind: TaskKind | None = Query(default=TaskKind.task),
+    kind: str | None = Query(default="task"),
     db: Session = Depends(get_db),
 ):
-    """Впорядковано алгоритмом: статус → дата → тривалість.
+    """Впорядковано алгоритмом: тримає роботу → статус → дата → тривалість.
 
-    kind=task (за замовчуванням) · duty · expectation · порожньо = всі.
+    kind=task (за замовчуванням) · duty · expectation · all або порожньо = всі.
     """
-    return service.list_tasks(db, include_done=include_done, kind=kind)
+    raw = (kind or "").strip().lower()
+    if raw in ("", "all"):
+        parsed = None
+    else:
+        try:
+            parsed = TaskKind(raw)
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, "kind: task, duty, expectation або all"
+            ) from exc
+    return service.list_tasks(db, include_done=include_done, kind=parsed)
 
 
 def _settings_out(db: Session) -> TaskSettingsOut:

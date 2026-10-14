@@ -287,3 +287,25 @@ def test_settings_api(client):
     assert upd["prep_hour"] == 17 and upd["tg_suggest_mode"] == "auto"
     assert client.patch("/api/tasks/settings", json={"quiet_from": "25:00"}).status_code == 422
     assert client.patch("/api/tasks/settings", json={"tg_suggest_mode": "loud"}).status_code == 422
+
+
+def test_site_quick_actions_and_all_kinds(client):
+    from datetime import datetime as _dt
+
+    a = client.post("/api/tasks", json={"title": "Своя", "blocks_work": True,
+                                        "external_url": "https://example.invalid/c#t-x"}).json()
+    client.post("/api/tasks", json={"title": "Чекаю", "kind": "expectation"})
+    assert a["source"] == "manual" and a["blocks_work"] is True
+    assert a["external_url"].endswith("#t-x")
+    assert len(client.get("/api/tasks").json()) == 1            # як і раніше: лише task
+    assert len(client.get("/api/tasks?kind=all").json()) == 2   # адмінка бачить усе
+    assert len(client.get("/api/tasks?kind=").json()) == 2
+    assert client.get("/api/tasks?kind=nope").status_code == 422
+
+    until = tasks_service.snooze_until_tomorrow().isoformat()
+    snoozed = client.patch(f"/api/tasks/{a['id']}", json={"snoozed_until": until}).json()
+    assert _dt.fromisoformat(snoozed["snoozed_until"].replace("Z", "+00:00"))
+    cleared = client.patch(f"/api/tasks/{a['id']}", json={"snoozed_until": None}).json()
+    assert cleared["snoozed_until"] is None
+    done = client.patch(f"/api/tasks/{a['id']}", json={"status": "done"}).json()
+    assert done["done_at"] is not None
