@@ -70,6 +70,8 @@ def snooze(db: Session, task: Task) -> Task:
 
 #: Звідки бувають задачі. Рядок у базі; новий — дописати сюди.
 SOURCES = ("manual", "bot", "focus", "gate", "claude", "telegram", "calendar", "email")
+#: Джерела, що живуть поза сервером: їх не видаляє авторитетний синк із ПК.
+EXTERNAL_SOURCES = ("claude", "telegram", "calendar", "email")
 
 
 def link_key(source: str, external_id: str) -> str:
@@ -282,8 +284,15 @@ def sync(db: Session, payload: SyncRequest) -> tuple[list[Task], int, int]:
 
     deleted = 0
     if payload.authoritative:
-        # ПК щойно редагували → чого там немає, те видалено
-        for task in db.scalars(select(Task).where(Task.deleted_at.is_(None))):
+        # ПК щойно редагували → чого там немає, те видалено. Але лише серед
+        # задач, якими ПК володіє: задачі чек-листа, Telegram, календаря й
+        # пошти живуть у своєму джерелі, і їхнє зникнення з focus.md (агент
+        # міг їх просто не записати) не має закривати картки через синк.
+        owned = select(Task).where(
+            Task.deleted_at.is_(None),
+            Task.source.not_in(EXTERNAL_SOURCES),
+        )
+        for task in db.scalars(owned):
             if task.uid not in seen:
                 task.deleted_at = datetime.now(timezone.utc)
                 deleted += 1

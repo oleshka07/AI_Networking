@@ -309,3 +309,27 @@ def test_site_quick_actions_and_all_kinds(client):
     assert cleared["snoozed_until"] is None
     done = client.patch(f"/api/tasks/{a['id']}", json={"status": "done"}).json()
     assert done["done_at"] is not None
+
+
+def test_daily_job_carries_morning_plan_in_one_message(db, monkeypatch):
+    from app.core.config import settings
+    from app.modules.automation import daily, telegram
+
+    monkeypatch.setattr(settings, "telegram_bot_token", "test-token", raising=False)
+    monkeypatch.setattr(settings, "telegram_chat_id", "42", raising=False)
+    monkeypatch.setattr(nudges, "_events_between", lambda *a, **kw: [])
+    sent = []
+    monkeypatch.setattr(telegram, "send_message", lambda text, **kw: sent.append((text, kw)) or True)
+
+    # Порожня мережа і жодної задачі — тиша, як і раніше.
+    assert daily.run_daily_job().get("telegram_skipped")
+    assert sent == []
+
+    _task(db, "Тримає роботу", blocks_work=True)
+    summary = daily.run_daily_job()
+    assert summary.get("telegram_sent") and summary.get("plan_tasks") == 1
+    (text, kw), = sent
+    assert "Сьогодні" in text and "Тримає роботу" in text
+    rows = kw["reply_markup"]["inline_keyboard"]
+    assert rows[0][0]["callback_data"].startswith("tk:done:")
+    assert external.get_settings(db).sent_count >= 1  # план рахується в денну стелю

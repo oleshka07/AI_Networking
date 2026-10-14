@@ -211,3 +211,45 @@ def test_done_at_is_stamped_wherever_a_task_closes(db):
     task.status = TaskStatus.todo
     db.commit()
     assert task.done_at is None and task.done_via is None
+
+
+def test_pc_authoritative_sync_leaves_external_sources_alone(client):
+    from app.core.database import SessionLocal
+
+    with SessionLocal() as db:
+        _card(db, ext="card-keep")
+        db.add(Task(uid="pc0001", title="Була у focus.md", source="focus"))
+        db.commit()
+    r = client.post("/api/tasks/sync", json={"tasks": [], "authoritative": True})
+    assert r.status_code == 200 and r.json()["deleted"] == 1
+    with SessionLocal() as db:
+        alive = {t.uid: t.deleted_at for t in db.query(Task).all()}
+        assert alive["pc0001"] is not None                       # своє ПК видаляє
+        card = db.query(Task).filter(Task.source == "claude").one()
+        assert card.deleted_at is None                           # чек-лист — ні
+
+
+def test_closed_by_telegram_button_shows_up_in_changes(client):
+    """Приймання №3: закрив кнопкою в Telegram — синк бачить це в змінах."""
+    from app.core.database import SessionLocal
+    from app.modules.telegram_bot import handlers
+
+    class Bot:
+        def answer_callback(self, *a, **kw):
+            pass
+
+        def send_message(self, *a, **kw):
+            pass
+
+    with SessionLocal() as db:
+        uid = _card(db)["uid"]
+        since = _call(db, "crm_list_task_changes")["server_time"]
+        task_id = db.query(Task).filter(Task.uid == uid).one().id
+
+    handlers._handle_task_callback(Bot(), "cb", f"tk:done:{task_id}", 42)
+
+    with SessionLocal() as db:
+        (row,) = _call(db, "crm_list_task_changes", since=since, sources=["claude"])["changes"]
+        assert row["uid"] == uid and row["status"] == "done" and row["done_at"]
+        # І чек-лист більше не відкриє її сам: закрив сервер.
+        assert _card(db, status="todo")["conflict"] == "done_on_server"
