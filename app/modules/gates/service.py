@@ -72,6 +72,7 @@ def create_gate(
         uid=new_uid(),
         title=" ".join(text.split())[:300],
         item_type=GATE_TYPE,
+        source="gate",
         status=TaskStatus.todo,
         project=(project or None),
         goal_id=goal.id if goal else None,

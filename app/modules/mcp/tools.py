@@ -808,6 +808,49 @@ def send_owner_message(db: Session, args: dict) -> str:
     return "Повідомлення власнику надіслано."
 
 
+# ── Синк із чек-листом Claude (профіль sync) ───────────────────────────────
+# Відповідь — JSON рядком, а не проза: її читає програма запланованої задачі.
+
+
+def _sync_call(db: Session, tool: str, fn, args: dict) -> str:
+    import json
+
+    from app.modules.tasks import external
+
+    try:
+        result = fn(db, args)
+    except external.ExternalError as exc:
+        db.rollback()
+        external.note_sync(db, tool, error=str(exc))
+        raise ToolError(str(exc)) from exc
+    external.note_sync(db, tool)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def upsert_task(db: Session, args: dict) -> str:
+    from app.modules.tasks import external
+
+    return _sync_call(db, "crm_upsert_task", external.upsert, args)
+
+
+def list_task_changes(db: Session, args: dict) -> str:
+    from app.modules.tasks import external
+
+    return _sync_call(db, "crm_list_task_changes", external.list_changes, args)
+
+
+def link_task(db: Session, args: dict) -> str:
+    from app.modules.tasks import external
+
+    return _sync_call(db, "crm_link_task", external.link, args)
+
+
+def close_missing(db: Session, args: dict) -> str:
+    from app.modules.tasks import external
+
+    return _sync_call(db, "crm_close_missing", external.close_missing, args)
+
+
 def _schema(props: dict, required: list[str] | None = None) -> dict:
     return {
         "type": "object",
@@ -952,6 +995,46 @@ TOOLS: list[dict] = [
     {"name": "crm_send_owner_message", "title": "Написати власнику",
      "description": "Надсилає текст власнику в Telegram як є. Для підсумків і того, що він має побачити зараз.",
      "inputSchema": _schema({"text": {"type": "string"}}, ["text"]), "annotations": _WRITE},
+    # ── синк із чек-листом (профіль sync); відповіді — JSON ──
+    {"name": "crm_upsert_task", "title": "Задача з джерела",
+     "description": "Створює або оновлює задачу за (source, external_id); повторний виклик не створює дубля. Відповідь JSON {uid, created, status[, conflict]}. conflict=done_on_server — задачу закрили тут, закрий картку. Закрити з джерела — status=done.",
+     "inputSchema": _schema({
+         "source": {"type": "string", "description": "claude, telegram, calendar, email, manual, bot, focus, gate"},
+         "external_id": {"type": "string", "description": "id у джерелі, до 80 символів (для чек-листа — id картки)"},
+         "title": {"type": "string", "description": "до 300 символів; обовʼязкова для нової"},
+         "project": {"type": "string"},
+         "status": {"type": "string", "description": "immediate, urgent, current, todo, hold, done"},
+         "kind": {"type": "string", "description": "task, duty, expectation"},
+         "due_date": {"type": "string", "description": "YYYY-MM-DD; порожньо — без строку"},
+         "duration_min": {"type": "integer"},
+         "tags": {"type": "array", "items": {"type": "string"}},
+         "notes": {"type": "string"},
+         "url": {"type": "string", "description": "посилання на картку чи джерело"},
+         "blocks_work": {"type": "boolean"},
+         "counterpart": {"type": "string"},
+     }, ["source", "external_id"]),
+     "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {"name": "crm_list_task_changes", "title": "Зміни задач",
+     "description": "JSON {server_time, changes[]}: усе створене, змінене, закрите чи видалене (deleted: true) після since. server_time збережи як наступний since.",
+     "inputSchema": _schema({
+         "since": {"type": "string", "description": "ISO-час; порожньо — усі задачі"},
+         "sources": {"type": "array", "items": {"type": "string"}, "description": "лише ці джерела (враховує й звʼязані з ними задачі)"},
+     }), "annotations": _RO},
+    {"name": "crm_link_task", "title": "Звʼязати задачу з карткою",
+     "description": "Рідну задачу сервера (з Telegram, календаря) звʼязує з карткою джерела, щоб вона не імпортувалась удруге. Далі crm_upsert_task з тим самим source/external_id оновлює саме її.",
+     "inputSchema": _schema({
+         "uid": {"type": "string"}, "source": {"type": "string"},
+         "external_id": {"type": "string"}, "url": {"type": "string"},
+     }, ["uid", "source", "external_id"]),
+     "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+    {"name": "crm_close_missing", "title": "Закрити відсутні в джерелі",
+     "description": "Закриває задачі джерела, яких немає в keep_external_ids (картку видалили чи закрили, поки синк не бачив), з позначкою «закрито в джерелі». JSON {closed[], count}.",
+     "inputSchema": _schema({
+         "source": {"type": "string"},
+         "keep_external_ids": {"type": "array", "items": {"type": "string"}},
+         "confirm_all": {"type": "boolean", "description": "true — лише якщо порожній список справді означає «закрити все»"},
+     }, ["source", "keep_external_ids"]),
+     "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
 ]
 
 HANDLERS = {
@@ -992,6 +1075,10 @@ HANDLERS = {
     "crm_record_checkin_review": record_checkin_review,
     "crm_get_week_block": get_week_block,
     "crm_send_owner_message": send_owner_message,
+    "crm_upsert_task": upsert_task,
+    "crm_list_task_changes": list_task_changes,
+    "crm_link_task": link_task,
+    "crm_close_missing": close_missing,
 }
 
 #: Профілі для фонового воркера: `?profile=<name>` у адресі MCP обмежує
@@ -1006,6 +1093,9 @@ PROFILES: dict[str, list[str]] = {
                "crm_mark_posts_processed"],
     "coach": ["crm_get_pending_coach_question", "crm_set_coach_question", "crm_get_checkin_to_review",
               "crm_record_checkin_review", "crm_get_week_block", "crm_send_owner_message", "crm_list_goals"],
+    # Синк із чек-листом Claude: запланована задача бачить лише це (docs/CLAUDE_CHECKLIST.md).
+    "sync": ["crm_upsert_task", "crm_list_task_changes", "crm_link_task", "crm_close_missing",
+             "crm_complete_task", "crm_send_owner_message"],
 }
 
 
@@ -1016,7 +1106,7 @@ BACKGROUND_ONLY: frozenset[str] = frozenset(
     name for names in PROFILES.values() for name in names
 ) - {
     "crm_get_owner_voice", "crm_get_contact_memory", "crm_get_email", "crm_save_email_draft",
-    "crm_add_fact", "crm_list_goals",
+    "crm_add_fact", "crm_list_goals", "crm_complete_task",
 }
 
 

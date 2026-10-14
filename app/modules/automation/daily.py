@@ -126,16 +126,31 @@ def run_daily_job(send_digest: bool = True) -> dict:
                 and not data.upcoming
                 and not data.pending_events
             )
-            if settings.digest_quiet_when_empty and nothing_to_say:
+            # Ранковий план задач — у тому самому повідомленні, без окремого пушу.
+            plan = None
+            try:
+                from app.modules.tasks import nudges
+
+                plan = nudges.plan_block(db)
+            except Exception as exc:  # pragma: no cover - план не валить прогін
+                logger.warning("morning plan failed: %s", exc)
+            quiet_digest = settings.digest_quiet_when_empty and nothing_to_say
+            if quiet_digest and not plan:
                 summary["telegram_skipped"] = "quiet (nothing actionable)"
             elif settings.telegram_configured and settings.telegram_chat_id:
+                parts, rows = [], []
+                if plan:
+                    plan_text, plan_tasks = plan
+                    parts.append(plan_text)
+                    rows += nudges.task_keyboard_rows(plan_tasks)
+                    nudges.count_proactive(db)
+                    summary["plan_tasks"] = len(plan_tasks)
+                if not quiet_digest:
+                    parts.append(telegram.digest_text(data))
+                    rows.append([{"text": "🚀 Почати обхід", "callback_data": "q:start"}])
                 summary["telegram_sent"] = telegram.send_message(
-                    telegram.digest_text(data),
-                    reply_markup={
-                        "inline_keyboard": [
-                            [{"text": "🚀 Почати обхід", "callback_data": "q:start"}]
-                        ]
-                    },
+                    "\n\n".join(parts),
+                    reply_markup={"inline_keyboard": rows},
                 )
         logger.info("Daily job finished: %s", summary)
     finally:

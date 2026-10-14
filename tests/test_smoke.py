@@ -33,6 +33,8 @@ EXPECTED_TABLES = {
     "social_posts",
     "ai_jobs",
     "ai_jobs_control",
+    "tasks",
+    "task_settings",
 }
 
 EXPECTED_ROUTES = {
@@ -92,6 +94,8 @@ EXPECTED_ROUTES = {
     ("POST", "/api/tasks/sync"),
     ("POST", "/api/tasks/nudge"),
     ("POST", "/api/tasks/gsync"),
+    ("GET", "/api/tasks/settings"),
+    ("PATCH", "/api/tasks/settings"),
     ("GET", "/api/projects"),
     ("POST", "/api/projects"),
     ("PATCH", "/api/projects/{project_id}"),

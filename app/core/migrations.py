@@ -34,6 +34,15 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "google_task_id": "VARCHAR(120)",
         "google_synced_at": "TIMESTAMP",
         "google_sync": "BOOLEAN DEFAULT TRUE",
+        # Центр задач: звідки задача, звʼязок із карткою чек-листа, нагадування.
+        "source": "VARCHAR(20) DEFAULT 'manual'",
+        "external_id": "VARCHAR(80)",
+        "external_url": "VARCHAR(500)",
+        "linked_ref": "VARCHAR(120)",
+        "blocks_work": "BOOLEAN DEFAULT FALSE",
+        "snoozed_until": "TIMESTAMP",
+        "done_at": "TIMESTAMP",
+        "done_via": "VARCHAR(20)",
     },
     "goals": {
         "project_id": "INTEGER",
@@ -150,6 +159,43 @@ def _migrate_goal_status(engine: Engine, inspector) -> None:
         )
 
 
+#: Індекси під нові колонки tasks: create_all ставить їх лише на свіжій таблиці.
+_TASK_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS ix_tasks_source ON tasks (source)",
+    "CREATE INDEX IF NOT EXISTS ix_tasks_external_id ON tasks (external_id)",
+    "CREATE INDEX IF NOT EXISTS ix_tasks_linked_ref ON tasks (linked_ref)",
+)
+
+
+def _backfill_task_sources(engine: Engine) -> None:
+    """Джерело для задач, що жили до колонки ``source``, і ``done_at`` закритим.
+
+    Ворота впізнаються за ``item_type``; задачі з focus.md окремої ознаки не
+    мали, тож лишаються ``manual`` — нові з ``/sync`` отримують ``focus`` самі.
+    Обидва UPDATE ідемпотентні: другий прогін нічого не змінює.
+    """
+    try:
+        with engine.begin() as conn:
+            for stmt in _TASK_INDEXES:
+                conn.execute(text(stmt))
+            conn.execute(
+                text(
+                    "UPDATE tasks SET source = 'gate' "
+                    "WHERE item_type = 'gate' AND (source IS NULL OR source = 'manual')"
+                )
+            )
+            conn.execute(text("UPDATE tasks SET source = 'manual' WHERE source IS NULL"))
+            conn.execute(
+                text(
+                    "UPDATE tasks SET done_at = updated_at "
+                    "WHERE status = 'done' AND done_at IS NULL"
+                )
+            )
+            conn.execute(text("UPDATE tasks SET blocks_work = FALSE WHERE blocks_work IS NULL"))
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.warning("tasks backfill failed: %s", exc)
+
+
 def ensure_schema(engine: Engine) -> None:
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
@@ -172,6 +218,8 @@ def ensure_schema(engine: Engine) -> None:
             except Exception as exc:  # pragma: no cover - best effort
                 logger.warning("Schema patch failed (%s): %s", stmt, exc)
 
+    if "tasks" in existing_tables:
+        _backfill_task_sources(engine)
     if "checkins" in existing_tables:
         _relax_checkin_goal_id(engine)
     if "goals" in existing_tables:

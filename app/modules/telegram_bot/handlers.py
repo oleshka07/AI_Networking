@@ -53,6 +53,13 @@ def _task_meta(task) -> str:
     return " · ".join(bits)
 
 
+def _task_buttons(task) -> dict:
+    """✓ Готово / ▶ Взяв у роботу, нижче ⏰ Завтра і 🔗 Відкрити (якщо є картка)."""
+    from app.modules.tasks import nudges
+
+    return nudges.task_keyboard([task])
+
+
 # Reply-keyboard buttons the old Chater bot left stuck in the chat. Tapping
 # one used to open Chater's planner — now we clear the keyboard and help.
 _LEGACY_BUTTONS = {
@@ -454,7 +461,10 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
 
 
 def _handle_task_callback(client, cb_id: str, data: str, admin: int | None) -> None:
-    """Кнопки під задачею: ✓ готово / ▶ взяв у роботу. Далі показує наступну."""
+    """Кнопки під задачею: ✓ готово / ▶ взяв у роботу / ⏰ завтра / без підготовки.
+
+    Після ✓ і ▶ показує наступну задачу; ⏰ і «без підготовки» — ні.
+    """
     from app.modules.tasks import service as tasks_service
     from app.modules.tasks.models import Task, TaskStatus
 
@@ -469,6 +479,18 @@ def _handle_task_callback(client, cb_id: str, data: str, admin: int | None) -> N
         task = db.get(Task, task_id)
         if task is None or task.deleted_at is not None:
             client.answer_callback(cb_id, "Уже неактуально")
+            return
+        if action == "snz":
+            # ⏰ Завтра: до 09:00 задача мовчить; наступну не пропонуємо — це не «далі».
+            tasks_service.snooze(db, task)
+            client.answer_callback(cb_id, "⏰ Нагадаю завтра о 09:00")
+            return
+        if action == "noprep":
+            # Подію позначено «без підготовки»: задачу прибрано і більше не створимо.
+            from app.modules.tasks import nudges
+
+            nudges.mark_no_prep(db, task)
+            client.answer_callback(cb_id, "🚫 Без підготовки")
             return
         if action == "done":
             task.status = TaskStatus.done
@@ -488,10 +510,7 @@ def _handle_task_callback(client, cb_id: str, data: str, admin: int | None) -> N
             admin,
             f"{note}: {_esc(task.title)}\n\n🎯 <b>Далі</b>\n"
             + _esc(nxt.title) + "\n" + _task_meta(nxt),
-            reply_markup={"inline_keyboard": [[
-                {"text": "✓ Готово", "callback_data": f"tk:done:{nxt.id}"},
-                {"text": "▶ Взяв у роботу", "callback_data": f"tk:cur:{nxt.id}"},
-            ]]},
+            reply_markup=_task_buttons(nxt),
         )
 
 
@@ -2148,10 +2167,7 @@ def _handle_command(client, admin: int, text: str) -> None:
                     f"🎯 <b>Зараз</b> · {_esc(ctx or arg)}"
                     + (f" (ще {len(in_ctx) - 1})" if len(in_ctx) > 1 else "")
                     + "\n\n" + _esc(task.title) + "\n" + _task_meta(task),
-                    reply_markup={"inline_keyboard": [[
-                        {"text": "✓ Готово", "callback_data": f"tk:done:{task.id}"},
-                        {"text": "▶ Взяв у роботу", "callback_data": f"tk:cur:{task.id}"},
-                    ]]},
+                    reply_markup=_task_buttons(task),
                 )
                 return
             task = tasks_service.next_task(db)
@@ -2161,10 +2177,7 @@ def _handle_command(client, admin: int, text: str) -> None:
             client.send_message(
                 admin,
                 "🎯 <b>Зараз</b>\n\n" + _esc(task.title) + "\n" + _task_meta(task),
-                reply_markup={"inline_keyboard": [[
-                    {"text": "✓ Готово", "callback_data": f"tk:done:{task.id}"},
-                    {"text": "▶ Взяв у роботу", "callback_data": f"tk:cur:{task.id}"},
-                ]]},
+                reply_markup=_task_buttons(task),
             )
         elif cmd == "tasks":
             from app.modules.tasks import service as tasks_service
