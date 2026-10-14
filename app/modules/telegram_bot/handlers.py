@@ -53,6 +53,13 @@ def _task_meta(task) -> str:
     return " · ".join(bits)
 
 
+def _task_buttons(task) -> dict:
+    """✓ Готово / ▶ Взяв у роботу, нижче ⏰ Завтра і 🔗 Відкрити (якщо є картка)."""
+    from app.modules.tasks import nudges
+
+    return nudges.task_keyboard([task])
+
+
 # Reply-keyboard buttons the old Chater bot left stuck in the chat. Tapping
 # one used to open Chater's planner — now we clear the keyboard and help.
 _LEGACY_BUTTONS = {
@@ -390,6 +397,16 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
             from app.modules.automation import reminders as _reminders
 
             _reminders.complete_for_contact(db, contact.id)
+            name = contact.full_name
+        # Своя обіцянка («надішлю до пʼятниці») — пропозиція задачі. Чати,
+        # які веде ALiSiO, не чіпаємо: там говорить вона.
+        if not alisio_handled:
+            from . import task_intake
+
+            task_intake.maybe_suggest(
+                client, admin, name=name, chat_id=chat_id,
+                message_id=msg.get("message_id"), text=text, outgoing=True,
+            )
         return
 
     # Holos: повідомлення клієнта - лише якщо власник увімкнув там «👥 і питання клієнтів» (у фоні).
@@ -423,27 +440,47 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
             username=sender.get("username") or chat.get("username"),
             business_connection_id=bc_id,
         )
+        from . import task_intake
+
+        name = contact.full_name if contact else None
         if status == "paused":
             # Logged for context. Only ping when there's actually something to
             # act on (a meeting to schedule or a task to remember) — plain
             # chit-chat from a paused contact stays silent.
             flags = _detect_incoming_intent(text)
-            if admin and flags:
+            # Обіцянка чи прохання — кнопка «➕ Задача» на тій самій картці
+            # (режим auto — задача одразу); окремого повідомлення не шлемо.
+            found = task_intake.detect(text)
+            task_btn = None
+            if found is not None:
+                tg_mode = task_intake.mode(db)
+                if tg_mode == "auto":
+                    task_intake.create_from_message(
+                        db, name=name, chat_id=chat_id, message_id=msg.get("message_id"),
+                        text=text, kind=task_intake.task_kind(found, outgoing=False),
+                        commitment_type=found["type"], outgoing=False, due=found.get("due"),
+                    )
+                elif tg_mode == "suggest":
+                    task_btn = task_intake.task_button(
+                        found, chat_id, msg.get("message_id"), outgoing=False
+                    )
+            if admin and (flags or task_btn):
                 held = service.create_held_reply_draft(
                     db, contact, chat_id=chat_id, text=text,
                     business_connection_id=bc_id,
                 )
+                keyboard = _paused_keyboard(held.id, flags)
+                if task_btn:
+                    keyboard["inline_keyboard"].insert(0, [task_btn])
                 sent = client.send_message(
                     admin,
                     _paused_notice(contact, text),
-                    reply_markup=_paused_keyboard(held.id, flags),
+                    reply_markup=keyboard,
                 )
                 if sent:
                     service.set_admin_message(db, held, sent.get("message_id", 0))
             return
-        if draft is None:
-            return  # conversation-ender: logged, no reply needed
-        if admin:
+        if draft is not None and admin:
             sent = client.send_message(
                 admin,
                 _preview_text(contact, draft, is_new, drafting=(status == "drafting")),
@@ -451,10 +488,19 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
             )
             if sent:
                 service.set_admin_message(db, draft, sent.get("message_id", 0))
+    # Вхідне від будь-кого (крім пауз і чатів ALiSiO, їх відсіяно вище): видно
+    # прохання чи домовленість — окрема пропозиція задачі, не частіше разу на годину.
+    task_intake.maybe_suggest(
+        client, admin, name=name, chat_id=chat_id,
+        message_id=msg.get("message_id"), text=text, outgoing=False,
+    )
 
 
 def _handle_task_callback(client, cb_id: str, data: str, admin: int | None) -> None:
-    """Кнопки під задачею: ✓ готово / ▶ взяв у роботу. Далі показує наступну."""
+    """Кнопки під задачею: ✓ готово / ▶ взяв у роботу / ⏰ завтра / без підготовки.
+
+    Після ✓ і ▶ показує наступну задачу; ⏰ і «без підготовки» — ні.
+    """
     from app.modules.tasks import service as tasks_service
     from app.modules.tasks.models import Task, TaskStatus
 
@@ -469,6 +515,18 @@ def _handle_task_callback(client, cb_id: str, data: str, admin: int | None) -> N
         task = db.get(Task, task_id)
         if task is None or task.deleted_at is not None:
             client.answer_callback(cb_id, "Уже неактуально")
+            return
+        if action == "snz":
+            # ⏰ Завтра: до 09:00 задача мовчить; наступну не пропонуємо — це не «далі».
+            tasks_service.snooze(db, task)
+            client.answer_callback(cb_id, "⏰ Нагадаю завтра о 09:00")
+            return
+        if action == "noprep":
+            # Подію позначено «без підготовки»: задачу прибрано і більше не створимо.
+            from app.modules.tasks import nudges
+
+            nudges.mark_no_prep(db, task)
+            client.answer_callback(cb_id, "🚫 Без підготовки")
             return
         if action == "done":
             task.status = TaskStatus.done
@@ -488,10 +546,7 @@ def _handle_task_callback(client, cb_id: str, data: str, admin: int | None) -> N
             admin,
             f"{note}: {_esc(task.title)}\n\n🎯 <b>Далі</b>\n"
             + _esc(nxt.title) + "\n" + _task_meta(nxt),
-            reply_markup={"inline_keyboard": [[
-                {"text": "✓ Готово", "callback_data": f"tk:done:{nxt.id}"},
-                {"text": "▶ Взяв у роботу", "callback_data": f"tk:cur:{nxt.id}"},
-            ]]},
+            reply_markup=_task_buttons(nxt),
         )
 
 
@@ -510,6 +565,18 @@ def handle_callback(client, cb: dict) -> None:
 
     if data.startswith("tk:"):
         _handle_task_callback(client, cb_id, data, admin)
+        return
+
+    if data.startswith("tg:"):
+        from . import task_intake
+
+        task_intake.handle_callback(client, cb_id, data, admin, msg)
+        return
+
+    if data.startswith("dg:"):
+        from . import task_intake
+
+        task_intake.handle_delegate_callback(client, cb_id, data, admin, msg)
         return
 
     if data.startswith("r:"):
@@ -829,6 +896,11 @@ def handle_admin_message(client, msg: dict) -> None:
             _request_timereport(client, admin)
             return
         if _handle_coach_answer(client, admin, text.strip()):
+            return
+        # «Попроси Марію надіслати рахунок до пʼятниці» — чернетка їй і задача-очікування.
+        from . import task_intake
+
+        if task_intake.handle_delegate(client, admin, text.strip()):
             return
         if _handle_assistant_intent(client, admin, text.strip()):
             return
@@ -2148,10 +2220,7 @@ def _handle_command(client, admin: int, text: str) -> None:
                     f"🎯 <b>Зараз</b> · {_esc(ctx or arg)}"
                     + (f" (ще {len(in_ctx) - 1})" if len(in_ctx) > 1 else "")
                     + "\n\n" + _esc(task.title) + "\n" + _task_meta(task),
-                    reply_markup={"inline_keyboard": [[
-                        {"text": "✓ Готово", "callback_data": f"tk:done:{task.id}"},
-                        {"text": "▶ Взяв у роботу", "callback_data": f"tk:cur:{task.id}"},
-                    ]]},
+                    reply_markup=_task_buttons(task),
                 )
                 return
             task = tasks_service.next_task(db)
@@ -2161,10 +2230,7 @@ def _handle_command(client, admin: int, text: str) -> None:
             client.send_message(
                 admin,
                 "🎯 <b>Зараз</b>\n\n" + _esc(task.title) + "\n" + _task_meta(task),
-                reply_markup={"inline_keyboard": [[
-                    {"text": "✓ Готово", "callback_data": f"tk:done:{task.id}"},
-                    {"text": "▶ Взяв у роботу", "callback_data": f"tk:cur:{task.id}"},
-                ]]},
+                reply_markup=_task_buttons(task),
             )
         elif cmd == "tasks":
             from app.modules.tasks import service as tasks_service

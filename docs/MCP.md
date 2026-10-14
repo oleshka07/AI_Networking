@@ -74,12 +74,30 @@ nginx.
 
 ## Профілі для фонового воркера
 
-`/mcp/<token>?profile=reply|inbox|memory|social|coach` обмежує `tools/list`
+`/mcp/<token>?profile=reply|inbox|memory|social|coach|sync` обмежує `tools/list`
 до 4–8 інструментів однієї фонової задачі (менше схем у контексті — менше
-квоти). Без профілю — інтерактивний набір із 22 інструментів нижче; 15
+квоти). Без профілю — інтерактивний набір із 22 інструментів нижче; 19
 фонових (`crm_get_pending_reply`, `crm_fill_reply_draft`, `crm_triage_email`,
-`crm_save_dossier`, `crm_set_coach_question`, …) у ньому не показуються, але
-викликаються. Деталі — [BACKGROUND_AI.md](BACKGROUND_AI.md).
+`crm_save_dossier`, `crm_set_coach_question`, синк задач…) у ньому не
+показуються, але викликаються. Деталі — [BACKGROUND_AI.md](BACKGROUND_AI.md).
+
+### Профіль `sync` — чек-лист Claude
+
+Запланована задача Claude, що синкає картки «Задач Олега» із задачами
+сервера, підключається з `?profile=sync` і бачить шість інструментів:
+
+| Інструмент | Відповідь (JSON рядком) |
+|---|---|
+| `crm_upsert_task` — створити/оновити за (`source`, `external_id`), без дублів | `{"uid", "created", "status"}`, за потреби `"conflict": "done_on_server"` |
+| `crm_list_task_changes` — створене, змінене, закрите, видалене після `since` | `{"server_time", "changes": [...]}` |
+| `crm_link_task` — звʼязати рідну задачу з карткою | `{"uid", "linked"}` |
+| `crm_close_missing` — закрити те, чого джерело більше не має | `{"closed": [...], "count"}` |
+| `crm_complete_task`, `crm_send_owner_message` | текст, як і в інших профілях |
+
+На відміну від решти інструментів, ці відповідають JSON, а не прозою: їх
+читає програма. Контракт і діагностика — [CLAUDE_CHECKLIST.md](CLAUDE_CHECKLIST.md).
+Кожен виклик пишеться в панель «Синк з чек-листом» на сайті (час, інструмент,
+остання помилка).
 
 ## Інструменти (22 інтерактивних)
 

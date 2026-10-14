@@ -9,7 +9,16 @@ from app.core.database import get_db
 
 from . import service
 from .models import Task, TaskKind
-from .schemas import SyncRequest, SyncResponse, TaskIn, TaskOut, TaskUpdate
+from .schemas import (
+    SyncRequest,
+    SyncResponse,
+    SyncStatusOut,
+    TaskIn,
+    TaskOut,
+    TaskSettingsOut,
+    TaskSettingsUpdate,
+    TaskUpdate,
+)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -24,14 +33,56 @@ def _task_or_404(db: Session, task_id: int):
 @router.get("", response_model=list[TaskOut])
 def list_tasks(
     include_done: bool = Query(default=False),
-    kind: TaskKind | None = Query(default=TaskKind.task),
+    kind: str | None = Query(default="task"),
     db: Session = Depends(get_db),
 ):
-    """Впорядковано алгоритмом: статус → дата → тривалість.
+    """Впорядковано алгоритмом: тримає роботу → статус → дата → тривалість.
 
-    kind=task (за замовчуванням) · duty · expectation · порожньо = всі.
+    kind=task (за замовчуванням) · duty · expectation · all або порожньо = всі.
     """
-    return service.list_tasks(db, include_done=include_done, kind=kind)
+    raw = (kind or "").strip().lower()
+    if raw in ("", "all"):
+        parsed = None
+    else:
+        try:
+            parsed = TaskKind(raw)
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, "kind: task, duty, expectation або all"
+            ) from exc
+    return service.list_tasks(db, include_done=include_done, kind=parsed)
+
+
+def _settings_out(db: Session) -> TaskSettingsOut:
+    from . import external
+
+    row = external.get_settings(db)
+    out = TaskSettingsOut.model_validate(row)
+    out.sync = SyncStatusOut(
+        last_at=row.sync_last_at, last_tool=row.sync_last_tool,
+        error=row.sync_error, error_at=row.sync_error_at,
+        **external.sync_counts(db),
+    )
+    return out
+
+
+# Маршрути без {task_id} — вище за /{task_id}, інакше "settings" ловився б як id.
+@router.get("/settings", response_model=TaskSettingsOut)
+def get_settings(db: Session = Depends(get_db)):
+    """Нагадування (години в базі, як у коуча) і стан синку з чек-листом Claude."""
+    return _settings_out(db)
+
+
+@router.patch("/settings", response_model=TaskSettingsOut)
+def update_settings(payload: TaskSettingsUpdate, db: Session = Depends(get_db)):
+    from . import external
+
+    row = external.get_settings(db)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(row, field, value)
+    db.commit()
+    return _settings_out(db)
 
 
 @router.get("/next", response_model=TaskOut | None)

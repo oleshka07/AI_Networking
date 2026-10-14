@@ -82,6 +82,18 @@ def start() -> None:
         replace_existing=True,
         misfire_grace_time=1800,
     )
+    # Нагадування про задачі: блокери щогодини, підготовка до зустрічей — у свою
+    # годину з task_settings. :00, бо підготовка обіцяна «о 18:00».
+    from app.modules.tasks.nudges import run_tick as run_task_nudges
+
+    _scheduler.add_job(
+        run_task_nudges,
+        "cron",
+        minute=0,
+        id="task_nudges",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
     # Памʼять про людей: досьє й факти переписуються самі, коли назбиралось нове.
     from app.modules.insights.service import run_consolidation
 

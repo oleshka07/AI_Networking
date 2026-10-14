@@ -32,13 +32,96 @@ def new_uid() -> str:
 
 
 def order_key(t: Task, today: date | None = None):
-    """Статус → дата → тривалість. Коротші задачі вперед: швидкі перемоги."""
+    """Тримає роботу → статус → дата → тривалість. Коротші вперед: швидкі перемоги.
+
+    ``blocks_work`` іде першим серед незакритих: поки задача стоїть, стоїть
+    і чиясь робота, тож вона важить більше за будь-який статус.
+    """
     today = today or datetime.now(timezone.utc).date()
     rank = _RANK.get(t.status, 3)
     days = (t.due_date - today).days if t.due_date else _FAR
     if t.status == TaskStatus.urgent and t.due_date and days <= 0:
         rank = 1  # у день дедлайну підіймається майже на самий верх
-    return (rank, days, t.duration_min or _FAR, t.id)
+    blocker = 0 if (t.blocks_work and t.status != TaskStatus.done) else 1
+    return (blocker, rank, days, t.duration_min or _FAR, t.id)
+
+
+def is_snoozed(t: Task, now: datetime | None = None) -> bool:
+    """Задачу відклали кнопкою «⏰ Завтра» — до цього часу вона не нагадує."""
+    until = to_utc(t.snoozed_until)
+    return until is not None and until > (now or datetime.now(timezone.utc))
+
+
+def snooze_until_tomorrow(now: datetime | None = None) -> datetime:
+    """Завтра 09:00 за часом сервера (як і решта розкладу), у UTC."""
+    local = (now or datetime.now(timezone.utc)).astimezone()
+    tomorrow = (local + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    return tomorrow.astimezone(timezone.utc)
+
+
+def snooze(db: Session, task: Task) -> Task:
+    task.snoozed_until = snooze_until_tomorrow()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+# ── Задачі із зовнішніх джерел ──────────────────────────────────────────────
+
+#: Звідки бувають задачі. Рядок у базі; новий — дописати сюди.
+SOURCES = ("manual", "bot", "focus", "gate", "claude", "telegram", "calendar", "email")
+#: Джерела, що живуть поза сервером: їх не видаляє авторитетний синк із ПК.
+EXTERNAL_SOURCES = ("claude", "telegram", "calendar", "email")
+
+
+def link_key(source: str, external_id: str) -> str:
+    return f"{source}:{external_id}"
+
+
+def find_external(db: Session, source: str, external_id: str,
+                  *, include_deleted: bool = True) -> Task | None:
+    """Задача за (source, external_id) — своя або рідна, звʼязана з карткою.
+
+    Пара унікальна серед непорожніх, і тримає це сервіс, а не індекс: SQLite і
+    Postgres по-різному поводяться з частковими унікальними індексами. Якщо
+    рядків раптом кілька — беремо найстаріший, решта лишається видимою.
+    """
+    if not source or not external_id:
+        return None
+    from sqlalchemy import or_
+
+    stmt = select(Task).where(
+        or_(
+            (Task.source == source) & (Task.external_id == external_id),
+            Task.linked_ref == link_key(source, external_id),
+        )
+    )
+    if not include_deleted:
+        stmt = stmt.where(Task.deleted_at.is_(None))
+    return db.scalars(stmt.order_by(Task.id)).first()
+
+
+def tasks_of_source(db: Session, source: str) -> list[Task]:
+    """Живі задачі джерела: власні й рідні, звʼязані з ним через ``linked_ref``."""
+    from sqlalchemy import or_
+
+    return list(
+        db.scalars(
+            select(Task).where(
+                Task.deleted_at.is_(None),
+                or_(Task.source == source, Task.linked_ref.like(f"{source}:%")),
+            )
+        )
+    )
+
+
+def external_key_of(t: Task, source: str) -> str | None:
+    """Ідентифікатор задачі в джерелі ``source`` (власний або через звʼязок)."""
+    if t.source == source and t.external_id:
+        return t.external_id
+    if t.linked_ref and t.linked_ref.startswith(source + ":"):
+        return t.linked_ref[len(source) + 1:]
+    return None
 
 
 def set_project(db: Session, task: Task, name: str | None) -> None:
@@ -164,7 +247,7 @@ def sync(db: Session, payload: SyncRequest) -> tuple[list[Task], int, int]:
     for incoming in payload.tasks:
         task = get_by_uid(db, incoming.uid) if incoming.uid else None
         if task is None:
-            task = Task(uid=incoming.uid or new_uid())
+            task = Task(uid=incoming.uid or new_uid(), source="focus")
             db.add(task)
             applied += 1
         else:
@@ -201,8 +284,15 @@ def sync(db: Session, payload: SyncRequest) -> tuple[list[Task], int, int]:
 
     deleted = 0
     if payload.authoritative:
-        # ПК щойно редагували → чого там немає, те видалено
-        for task in db.scalars(select(Task).where(Task.deleted_at.is_(None))):
+        # ПК щойно редагували → чого там немає, те видалено. Але лише серед
+        # задач, якими ПК володіє: задачі чек-листа, Telegram, календаря й
+        # пошти живуть у своєму джерелі, і їхнє зникнення з focus.md (агент
+        # міг їх просто не записати) не має закривати картки через синк.
+        owned = select(Task).where(
+            Task.deleted_at.is_(None),
+            Task.source.not_in(EXTERNAL_SOURCES),
+        )
+        for task in db.scalars(owned):
             if task.uid not in seen:
                 task.deleted_at = datetime.now(timezone.utc)
                 deleted += 1
@@ -337,6 +427,7 @@ def create_reminder_task(
         recur_days=recur_days,
         goal_id=goal_id,
         item_type="нагадування",
+        source="bot",
         next_remind_at=(
             datetime.now(timezone.utc) + timedelta(days=recur_days)
             if recur_days
@@ -385,6 +476,7 @@ def due_reminder_tasks(db: Session) -> list[Task]:
         if t.next_remind_at is not None
         and t.status not in (TaskStatus.done, TaskStatus.hold)
         and to_utc(t.next_remind_at) <= now
+        and not is_snoozed(t, now)
     ]
 
 

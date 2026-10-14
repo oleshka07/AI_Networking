@@ -406,7 +406,7 @@ def _sync_calendar(
 
 
 def upcoming_events(
-    db: Session, minutes_min: int = 45, minutes_max: int = 75
+    db: Session, minutes_min: int = 45, minutes_max: int = 75, max_results: int = 10
 ) -> list[dict]:
     """Calendar events starting within [minutes_min, minutes_max] from now.
 
@@ -429,7 +429,7 @@ def upcoming_events(
                 timeMax=(now + timedelta(minutes=minutes_max)).isoformat(),
                 singleEvents=True,
                 orderBy="startTime",
-                maxResults=10,
+                maxResults=max_results,
             )
             .execute()
         )
@@ -457,6 +457,7 @@ def upcoming_events(
                     if a.get("email") and not a.get("self")
                 ],
                 "meet_link": event.get("hangoutLink"),
+                "html_link": event.get("htmlLink"),
             }
         )
     return out

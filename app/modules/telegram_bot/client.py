@@ -73,7 +73,9 @@ class BotClient:
         reply_markup: dict | None = None,
         parse_mode: str | None = "HTML",
         disable_preview: bool = True,
+        silent: bool = False,
     ):
+        """``silent`` — без звуку (години тиші): повідомлення лягає, але не будить."""
         return self.call(
             "sendMessage",
             chat_id=chat_id,
@@ -82,6 +84,7 @@ class BotClient:
             reply_markup=reply_markup,
             parse_mode=parse_mode,
             link_preview_options={"is_disabled": disable_preview},
+            disable_notification=True if silent else None,
         )
 
     def edit_message_text(

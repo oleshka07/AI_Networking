@@ -240,11 +240,22 @@ def run_midday_checkin() -> bool:
         return False
     from app.modules.automation import telegram
 
+    from app.modules.tasks import nudges
+
     with SessionLocal() as db:
         text = midday_checkin_text(db)
-    if not text:
+        # Строки сьогодні й прострочені — тим самим повідомленням, одним блоком.
+        deadlines = nudges.deadlines_block(db)
+    if not text and not deadlines:
         return False
-    return telegram.send_message(text, reply_markup=_QUEUE_BUTTON)
+    parts, rows = [], []
+    if deadlines:
+        parts.append(deadlines[0])
+        rows += nudges.task_keyboard_rows(deadlines[1])
+    if text:
+        parts.insert(0, text)
+        rows += _QUEUE_BUTTON["inline_keyboard"]
+    return telegram.send_message("\n\n".join(parts), reply_markup={"inline_keyboard": rows})
 
 
 def run_weekly_review() -> bool:
