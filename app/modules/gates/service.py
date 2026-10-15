@@ -150,6 +150,12 @@ def nudge(db: Session) -> str | None:
     stale = stale_gates(db)
     if not stale:
         return None
+    # Уночі мовчимо (тиша з налаштувань «Нагадування»), і вікно 6 год не
+    # витрачається: пінг прийде першим після ранку.
+    from app.modules.tasks import nudges as task_nudges
+
+    if task_nudges.in_quiet(task_nudges.get_settings(db)):
+        return None
     last = _last_nudge_at(db)
     if last and _now() - last < timedelta(hours=NUDGE_EVERY_HOURS):
         return None
