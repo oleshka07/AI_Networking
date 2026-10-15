@@ -194,6 +194,13 @@ def run_coach_tick() -> None:
         return
 
     now = datetime.now()
+    # Нічна тиша з налаштувань «Нагадування» діє і на коуча (рішення власника
+    # 15.10): уночі не питаємо; задачі-нагадування дочекаються ранку самі.
+    from app.modules.tasks import nudges as task_nudges
+
+    with SessionLocal() as db:
+        if task_nudges.in_quiet(task_nudges.get_settings(db), now):
+            return
     try:
         if now.weekday() == weekly_weekday and now.hour == weekly_hour:
             send_weekly()

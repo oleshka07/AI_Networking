@@ -1107,6 +1107,9 @@ BACKGROUND_ONLY: frozenset[str] = frozenset(
 ) - {
     "crm_get_owner_voice", "crm_get_contact_memory", "crm_get_email", "crm_save_email_draft",
     "crm_add_fact", "crm_list_goals", "crm_complete_task",
+    # Синк із чек-листом — і в звичайному наборі: запланована задача Claude
+    # ходить тим самим конектором, що й розмови (рішення власника 15.10).
+    "crm_upsert_task", "crm_list_task_changes", "crm_link_task", "crm_close_missing",
 }
 
 

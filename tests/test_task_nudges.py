@@ -333,3 +333,27 @@ def test_daily_job_carries_morning_plan_in_one_message(db, monkeypatch):
     rows = kw["reply_markup"]["inline_keyboard"]
     assert rows[0][0]["callback_data"].startswith("tk:done:")
     assert external.get_settings(db).sent_count >= 1  # план рахується в денну стелю
+
+
+def test_coach_and_gates_respect_quiet_hours(db, monkeypatch):
+    """Рішення власника 15.10: коуч і ворота — під нічну тишу (без денної стелі)."""
+    from app.modules.coach import jobs
+    from app.modules.gates import service as gates
+
+    _task(db, "Старі ворота", item_type="gate", source="gate",
+          created_at=NOW - timedelta(days=2))
+    cfg = external.get_settings(db)
+    cfg.quiet_from, cfg.quiet_to = "00:00", "23:59"   # тиша зараз
+    db.commit()
+    assert gates.nudge(db) is None
+    called = []
+    monkeypatch.setattr(jobs, "send_task_reminders", lambda: called.append("rem"))
+    monkeypatch.setattr(jobs, "send_question", lambda **kw: called.append("ask"))
+    jobs.run_coach_tick()
+    assert called == []
+
+    cfg.quiet_from, cfg.quiet_to = "00:00", "00:00"   # тишу вимкнено
+    db.commit()
+    assert gates.nudge(db) is not None
+    jobs.run_coach_tick()
+    assert "rem" in called
