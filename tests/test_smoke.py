@@ -35,6 +35,7 @@ EXPECTED_TABLES = {
     "ai_jobs_control",
     "tasks",
     "task_settings",
+    "held_messages",
 }
 
 EXPECTED_ROUTES = {

@@ -46,7 +46,7 @@ def test_envelopes_and_tool_results():
 def test_every_tool_schema_is_sound():
     assert protocol.validate_tool_specs(tools.TOOLS) == []
     assert set(tools.HANDLERS) == {t["name"] for t in tools.TOOLS}
-    assert 10 <= len(tools.tools_for(None)) <= 26  # інтерактивний набір (22 + 4 синку)
+    assert 10 <= len(tools.tools_for(None)) <= 28  # звичайний набір: 22 + 6 синку/«написати мені»
     assert len(tools.TOOLS) > len(tools.tools_for(None))  # фонові — лише за профілем
     for spec in tools.TOOLS:
         assert spec["name"].startswith("crm_")

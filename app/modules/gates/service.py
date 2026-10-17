@@ -159,6 +159,9 @@ def nudge(db: Session) -> str | None:
     last = _last_nudge_at(db)
     if last and _now() - last < timedelta(hours=NUDGE_EVERY_HOURS):
         return None
+    # Пінг воріт — у денну стелю разом із блокерами й пропозиціями задач.
+    if not task_nudges.allow_proactive(db):
+        return None
 
     lines = ["Ворота, які висять понад добу:"]
     for task in stale[:5]:

@@ -20,6 +20,17 @@ logger = logging.getLogger("networking.briefs")
 # an event once — harmless).
 _briefed: set[str] = set()
 
+#: У години тиші бриф приходить лише перед зустріччю, що починається раніше
+#: за цей час (хв від півночі): інакше перед ранковою зустріччю його не буде.
+EARLY_MEETING_BEFORE = 8 * 60 + 30
+
+
+def allowed_in_quiet(event: dict) -> bool:
+    """Ранню зустріч (до 08:30 за місцевим часом) тиша не глушить."""
+    start = event["start"]
+    local = start.astimezone() if start.tzinfo else start
+    return local.hour * 60 + local.minute < EARLY_MEETING_BEFORE
+
 
 def _esc(s: str | None) -> str:
     return html.escape(s or "")
@@ -78,9 +89,12 @@ def run_brief_check() -> int:
     from app.modules.automation import telegram
     from sqlalchemy import select
 
+    from app.modules.tasks import nudges
+
     lead = settings.meeting_brief_lead_minutes
     sent = 0
     with SessionLocal() as db:
+        quiet = nudges.quiet_now(db)
         try:
             events = google.upcoming_events(
                 db, minutes_min=max(lead - 15, 5), minutes_max=lead + 15
@@ -90,6 +104,8 @@ def run_brief_check() -> int:
             return 0
         for event in events:
             if not event["id"] or event["id"] in _briefed:
+                continue
+            if quiet and not allowed_in_quiet(event):
                 continue
             emails = [e for e in event.get("attendee_emails", []) if e]
             contacts = (

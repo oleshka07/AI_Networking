@@ -332,7 +332,8 @@ def test_daily_job_carries_morning_plan_in_one_message(db, monkeypatch):
     assert "Сьогодні" in text and "Тримає роботу" in text
     rows = kw["reply_markup"]["inline_keyboard"]
     assert rows[0][0]["callback_data"].startswith("tk:done:")
-    assert external.get_settings(db).sent_count >= 1  # план рахується в денну стелю
+    db.expire_all()
+    assert external.get_settings(db).sent_count == 0  # план — не в денній стелі (TASK-02)
 
 
 def test_coach_and_gates_respect_quiet_hours(db, monkeypatch):

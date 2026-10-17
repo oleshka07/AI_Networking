@@ -72,22 +72,23 @@ nginx.
 Токен лежить у `integration_tokens` під `provider="mcp"` — та сама таблиця,
 що й Google, без нової схеми.
 
-## Профілі для фонового воркера
+## Звичайний набір і профілі
 
-`/mcp/<token>?profile=reply|inbox|memory|social|coach|sync` обмежує `tools/list`
-до 4–8 інструментів однієї фонової задачі (менше схем у контексті — менше
-квоти). Без профілю — інтерактивний набір: 22 інструменти нижче плюс 4 синку
-задач (рішення власника 15.10 — запланована задача Claude ходить тим самим
-конектором); 15 фонових (`crm_get_pending_reply`, `crm_fill_reply_draft`,
-`crm_triage_email`, `crm_save_dossier`, `crm_set_coach_question`, …) у ньому не
-показуються, але викликаються. Деталі — [BACKGROUND_AI.md](BACKGROUND_AI.md).
+**Один конектор** (рішення власника 15.10, TASK-02). Адреса без профілю — це
+звичайний набір для всього, що робить Claude від імені власника: розмови,
+запланована задача синку чек-листа, «напиши мені в Telegram». У ньому 28
+інструментів: 21 з таблиці нижче, увесь профіль `sync` (шість) і
+`crm_update_contact`. Окремий конектор із `?profile=sync` більше не потрібен.
 
-### Профіль `sync` — чек-лист Claude
+`/mcp/<token>?profile=reply|inbox|memory|social|coach|sync` лишається для
+фонових задач (ті, що запускає сервер): `tools/list` звужується рівно до
+інструментів однієї задачі — менше схем у контексті, менше квоти. 14 фонових
+(`crm_get_pending_reply`, `crm_fill_reply_draft`, `crm_triage_email`,
+`crm_save_dossier`, `crm_set_coach_question`, …) у звичайному наборі не
+показуються, але викликаються. Межа — `BACKGROUND_ONLY` у
+`app/modules/mcp/tools.py`. Деталі — [BACKGROUND_AI.md](BACKGROUND_AI.md).
 
-Запланована задача Claude, що синкає картки «Задач Олега» із задачами
-сервера, ходить звичайним конектором (чотири інструменти синку є і без
-профілю). `?profile=sync` звужує список до шести, якщо колись знадобиться
-окремий легкий конектор:
+### Синк чек-листа й «написати мені»
 
 | Інструмент | Відповідь (JSON рядком) |
 |---|---|
@@ -95,24 +96,61 @@ nginx.
 | `crm_list_task_changes` — створене, змінене, закрите, видалене після `since` | `{"server_time", "changes": [...]}` |
 | `crm_link_task` — звʼязати рідну задачу з карткою | `{"uid", "linked"}` |
 | `crm_close_missing` — закрити те, чого джерело більше не має | `{"closed": [...], "count"}` |
-| `crm_complete_task`, `crm_send_owner_message` | текст, як і в інших профілях |
+| `crm_send_owner_message` — написати власнику в Telegram | `{"sent": true}` або `{"sent": false, "queued_until": "<ISO>", "reason": "quiet_hours" \| "daily_cap"}` |
+| `crm_complete_task` | текст |
 
-На відміну від решти інструментів, ці відповідають JSON, а не прозою: їх
-читає програма. Контракт і діагностика — [CLAUDE_CHECKLIST.md](CLAUDE_CHECKLIST.md).
-Кожен виклик пишеться в панель «Синк з чек-листом» на сайті (час, інструмент,
-остання помилка).
+Ці відповідають JSON, а не прозою: їх читає програма. Контракт синку й
+діагностика — [CLAUDE_CHECKLIST.md](CLAUDE_CHECKLIST.md); кожен виклик синку
+пишеться в панель «Синк з чек-листом» на сайті.
 
-## Інструменти (22 інтерактивних)
+**`crm_send_owner_message` і тиша.** У години тиші (`task_settings`, типово
+22:30–07:30) повідомлення не будить власника: воно стає в чергу й виходить
+першим блоком «Від Claude» у ранковому плані (або після кінця тиші, якщо
+плану того дня немає). `queued_until` — коли саме. `urgent: true` — лише
+якщо щось тримає роботу або строк сьогодні: обходить тишу, але рахується в
+денну стелю пінгів; стеля вичерпана — теж у чергу, `reason: "daily_cap"`.
+Удень без `urgent` іде одразу і в стелю не рахується. Правила тиші —
+[TASKS_CALENDAR.md](TASKS_CALENDAR.md#тиша-і-денна-стеля).
+
+### `crm_update_contact`
+
+Аргументи: `contact` (`#id` або частина імені), `importance` (`low` /
+`normal` / `high`, або `auto`), `cadence_days`, `do_not_contact`, `note`.
+Відповідь — JSON зі зміненими полями:
+
+```json
+{"contact": 12, "name": "Ганна Демо", "changed": {"importance": "high", "contact_frequency": "biweekly", "cadence_days": 14, "note_fact_id": 40}}
+```
+
+Імена полів у моделі контакту інші, ніж у TASK-02:
+
+| Аргумент | Поле `contacts` | Як |
+|---|---|---|
+| `importance` | `importance` (0–3) | auto=0, low=1, normal=2, high=3 |
+| `cadence_days` | `contact_frequency` | найближча зі шкали 7 / 14 / 30 / 90 / 182 / 365 днів |
+| `cadence_days: 0` | `do_not_contact = true` | окремого «не нагадувати» в моделі немає; нагадування й чергу вимикає саме стоп-лист |
+| `do_not_contact` | `do_not_contact` | прибирає з `crm_list_due_contacts`, з черги обходу й нагадувань про людину |
+| `note` | факт (`contact_facts`, `source=claude`) | до 500 символів |
+
+## Інструменти розмови (21)
 
 | Читання | Дії |
 |---|---|
-| `crm_get_owner_voice` — стиль і правила | `crm_save_message_draft` — дослівно в Telegram з кнопкою «Надіслати» |
+| `crm_get_owner_voice` — стиль і правила | `crm_save_message_draft` — дослівно в Telegram з кнопкою «Надіслати»; чат без вхідного за 24 год — «Відкрити чат» і «Скопіювати текст» |
 | `crm_get_contact_memory` — досьє, факти, історія, дописи | `crm_save_email_draft` — дослівно, і в чернетки Gmail |
 | `crm_search_contacts` — по імені/компанії, далі семантично | `crm_send_email_draft` — **незворотно**, позначено destructive |
 | `crm_list_due_contacts` — кому пора, з приводом | `crm_log_interaction`, `crm_add_fact` |
-| `crm_list_inbox`, `crm_get_email` | `crm_create_task`, `crm_complete_task` |
+| `crm_list_inbox`, `crm_get_email` | `crm_create_task` |
 | `crm_list_tasks`, `crm_list_goals`, `crm_list_gates` | `crm_log_goal_progress`, `crm_create_gate`, `crm_close_gate` |
 | | `crm_create_idea`, `crm_save_link`, `crm_set_reminder` |
+
+**Чернетка в «холодний» чат.** Telegram Business дає боту писати від імені
+власника лише в чат, де було вхідне повідомлення за останні 24 год. Якщо його
+не було, картка чернетки приходить без «✅ Надіслати»: «🔗 Відкрити чат»
+(`https://t.me/<username>`, інакше `tg://user?id=<id>`), «📋 Скопіювати текст»
+(до 256 символів — межа `CopyTextButton`; довший копіюють із самої картки) і
+«✔ Надіслав сам» — текст іде в історію взаємодій, чернетка закривається.
+Інструмент про це каже у відповіді.
 
 Вивід — компактний текст із короткими id (`#12`, `#a1b2c3`), не сирий JSON.
 Контакт приймається як `#id` або частина імені; кілька збігів — інструмент

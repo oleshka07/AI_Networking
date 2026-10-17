@@ -189,3 +189,29 @@ class TaskSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+
+
+class HeldMessage(Base):
+    """Те, що прийшло в години тиші й чекає ранку (docs/TASKS_CALENDAR.md, «Тиша»).
+
+    Два роди: ``suggestion`` — пропозиція задачі з переписки в Telegram,
+    ``owner`` — повідомлення від Claude (``crm_send_owner_message``). Уранці
+    вони виходять блоками «Від Claude» і «За ніч» у ранковому плані.
+
+    ``ref`` для пропозиції — ``tgb:<chat>:<msg>``: те саме повідомлення не
+    пропонується двічі, навіть якщо його вже показали чи відхилили.
+    """
+
+    __tablename__ = "held_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)
+    ref: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Вийшло з черги (ранковий план або окреме повідомлення після тиші).
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Пропозицію показано рядком із кнопками (перші пʼять — у плані, решта — «Ще…»).
+    shown_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Власник натиснув ➕ / 📅 / ✖ — пропозиція закрита.
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

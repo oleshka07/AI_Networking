@@ -94,6 +94,19 @@ def start() -> None:
         replace_existing=True,
         misfire_grace_time=1800,
     )
+    # Нічна черга («Від Claude», «За ніч»): виходить у ранковому плані, а якщо
+    # плану того дня немає — сама, щойно скінчилась тиша. Кожні 15 хв, бо кінець
+    # тиші (07:30) не на початку години.
+    from app.modules.tasks.quiet import release_pending
+
+    _scheduler.add_job(
+        release_pending,
+        "cron",
+        minute="*/15",
+        id="quiet_release",
+        replace_existing=True,
+        misfire_grace_time=900,
+    )
     # Памʼять про людей: досьє й факти переписуються самі, коли назбиралось нове.
     from app.modules.insights.service import run_consolidation
 
@@ -171,12 +184,16 @@ def shutdown() -> None:
 
 
 def run_daily_digest() -> None:
-    """Коротке зведення дня в Telegram (о 22:10 за часом сервера)."""
+    """Коротке зведення дня в Telegram (о 22:10 за часом сервера; у тишу — ні)."""
     from app.core.database import SessionLocal
+    from app.modules.tasks import nudges
     from app.modules.timereport import service as timereport
 
     try:
         with SessionLocal() as db:
+            if nudges.quiet_now(db):
+                logger.info("evening digest skipped: quiet hours")
+                return
             sent = timereport.send_daily(db)
         logger.info("evening digest sent=%s", sent)
     except Exception as exc:

@@ -194,7 +194,7 @@ def save_message_draft(db: Session, args: dict) -> str:
     """Дослівно кладе текст як чернетку в Telegram із кнопками «Надіслати/Вручну»."""
     from app.modules.automation import telegram as tg
     from app.modules.telegram_bot import service as bot
-    from app.modules.telegram_bot.handlers import _draft_keyboard, _esc
+    from app.modules.telegram_bot.handlers import _esc, send_draft_card
     from app.modules.telegram_bot.models import DraftKind, DraftStatus, TelegramDraft
 
     contact = _resolve_contact(db, args.get("contact"))
@@ -229,16 +229,25 @@ def save_message_draft(db: Session, args: dict) -> str:
     card = (
         f"✍️ <b>{_esc(contact.full_name)}</b> — чернетка з Claude\n\n{_esc(text)}"
     )
-    sent = tg._call(
-        "sendMessage",
-        chat_id=tg.settings.telegram_chat_id,
-        text=card,
-        parse_mode="HTML",
-        reply_markup=_draft_keyboard(draft.id, True, outreach=True),
-    )
-    message_id = ((sent or {}).get("result") or {}).get("message_id")
+    def _send(text_, kb):
+        sent = tg._call(
+            "sendMessage",
+            chat_id=tg.settings.telegram_chat_id,
+            text=text_,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        return ((sent or {}).get("result") or {}).get("message_id")
+
+    message_id = send_draft_card(_send, db, draft, card)
     if message_id:
         bot.set_admin_message(db, draft, int(message_id))
+        if not bot.can_reply(db, contact):
+            return (
+                f"Збережено дослівно (чернетка #{draft.id}). Від імені власника бот сюди не напише: "
+                "у чаті не було вхідного за 24 год (обмеження Telegram Business). Власник отримав "
+                "картку з «Відкрити чат» і «Скопіювати текст»; після відправки він натисне «Надіслав сам»."
+            )
         return f"Збережено дослівно. Картка з кнопкою «Надіслати» вже в Telegram у власника (чернетка #{draft.id})."
     return (
         f"Чернетку #{draft.id} збережено, але картку в Telegram надіслати не вдалося "
@@ -796,16 +805,95 @@ def get_week_block(db: Session, args: dict) -> str:
 
 
 def send_owner_message(db: Session, args: dict) -> str:
-    import html
+    """JSON {sent, queued_until?}: у години тиші повідомлення чекає ранкового плану.
 
-    from app.modules.automation import telegram
+    ``urgent`` — лише «тримає роботу» або строк сьогодні: обходить тишу, але
+    рахується в денну стелю пінгів (вичерпана — теж у чергу).
+    """
+    import json
+
+    from app.modules.tasks import quiet
 
     text = str(args.get("text") or "").strip()
     if not text:
         raise ToolError("Порожнє повідомлення.")
-    if not telegram.send_message(html.escape(text[:3800])):
-        raise ToolError("Telegram не прийняв повідомлення (бот не налаштований або помилка API).")
-    return "Повідомлення власнику надіслано."
+    try:
+        result = quiet.send_owner_message(db, text[:3800], urgent=bool(args.get("urgent")))
+    except RuntimeError as exc:
+        raise ToolError("Telegram не прийняв повідомлення (бот не налаштований або помилка API).") from exc
+    return json.dumps(result, ensure_ascii=False)
+
+
+def update_contact(db: Session, args: dict) -> str:
+    """Важливість, частота нагадувань, стоп-лист, нотатка-факт. JSON зі зміненими полями."""
+    import json
+
+    from app.modules.contacts.models import Frequency
+    from app.modules.insights import service as insights
+    from app.modules.insights.models import FactType
+
+    contact = _resolve_contact(db, args.get("contact"))
+    changed: dict = {}
+
+    if args.get("importance") not in (None, ""):
+        raw = str(args["importance"]).strip().lower()
+        if raw not in _IMPORTANCE:
+            raise ToolError("importance: low, normal, high (або auto — рахувати з діалогу).")
+        if contact.importance != _IMPORTANCE[raw]:
+            contact.importance = _IMPORTANCE[raw]
+            changed["importance"] = raw
+
+    if args.get("do_not_contact") is not None:
+        flag = bool(args["do_not_contact"])
+        if contact.do_not_contact != flag:
+            contact.do_not_contact = flag
+            changed["do_not_contact"] = flag
+
+    if args.get("cadence_days") not in (None, ""):
+        try:
+            days = int(args["cadence_days"])
+        except (TypeError, ValueError):
+            raise ToolError("cadence_days — ціле число днів; 0 — не нагадувати.") from None
+        if days < 0:
+            raise ToolError("cadence_days не може бути відʼємним; 0 — не нагадувати.")
+        if days == 0:
+            # Окремого «не нагадувати» в моделі немає: нагадування й чергу
+            # вимикає стоп-лист, тож 0 = do_not_contact.
+            if args.get("do_not_contact") is False:
+                raise ToolError("cadence_days=0 вимикає нагадування через стоп-лист — "
+                                "це суперечить do_not_contact=false.")
+            if not contact.do_not_contact:
+                contact.do_not_contact = True
+                changed["do_not_contact"] = True
+        else:
+            freq = min(_FREQ_DAYS, key=lambda f: abs(_FREQ_DAYS[f] - days))
+            freq = Frequency(freq)
+            if contact.contact_frequency != freq:
+                contact.contact_frequency = freq
+                changed["contact_frequency"] = freq.value
+                changed["cadence_days"] = _FREQ_DAYS[freq.value]
+
+    note = str(args.get("note") or "").strip()
+    if note:
+        fact = insights.add_fact(db, contact, fact_type=FactType.other,
+                                 value=note[:500], source="claude")
+        changed["note_fact_id"] = fact.id
+
+    if not changed:
+        return json.dumps({"contact": contact.id, "changed": {}}, ensure_ascii=False)
+    from app.modules.interactions import warmth
+
+    warmth.refresh(contact)
+    db.commit()
+    return json.dumps({"contact": contact.id, "name": contact.full_name, "changed": changed},
+                      ensure_ascii=False)
+
+
+#: low/normal/high → Contact.importance (1..3); auto — 0, рахувати з діалогу.
+_IMPORTANCE = {"auto": 0, "low": 1, "normal": 2, "high": 3}
+#: Частота нагадувань: найближча зі шкали Contact.contact_frequency.
+_FREQ_DAYS = {"weekly": 7, "biweekly": 14, "monthly": 30, "quarterly": 90,
+              "biannual": 182, "yearly": 365}
 
 
 # ── Синк із чек-листом Claude (профіль sync) ───────────────────────────────
@@ -993,8 +1081,19 @@ TOOLS: list[dict] = [
      "description": "Готовий тижневий зріз по цілях (цифри, зміни статусів, записи, ворота) і ознака «тиждень без руху».",
      "inputSchema": _schema({}), "annotations": _RO},
     {"name": "crm_send_owner_message", "title": "Написати власнику",
-     "description": "Надсилає текст власнику в Telegram як є. Для підсумків і того, що він має побачити зараз.",
-     "inputSchema": _schema({"text": {"type": "string"}}, ["text"]), "annotations": _WRITE},
+     "description": "Надсилає текст власнику в Telegram як є. Відповідь JSON {sent, queued_until?}: у години тиші (типово 22:30–07:30) повідомлення чекає ранкового плану, блок «Від Claude». urgent=true — лише якщо щось тримає роботу або строк сьогодні: обходить тишу, але йде в денну стелю пінгів.",
+     "inputSchema": _schema({"text": {"type": "string"},
+                             "urgent": {"type": "boolean", "description": "тримає роботу або строк сьогодні"}},
+                            ["text"]), "annotations": _WRITE},
+    {"name": "crm_update_contact", "title": "Змінити контакт",
+     "description": "Важливість, частота нагадувань, стоп-лист і нотатка про людину. Відповідь JSON зі зміненими полями. cadence_days підбирає найближчу частоту (7/14/30/90/182/365); 0 — не нагадувати (ставить стоп-лист). do_not_contact прибирає людину з «кому пора написати», нагадувань і черги.",
+     "inputSchema": _schema({
+         "contact": _CONTACT,
+         "importance": {"type": "string", "description": "low, normal, high або auto"},
+         "cadence_days": {"type": "integer", "minimum": 0, "description": "раз на скільки днів нагадувати; 0 — не нагадувати"},
+         "do_not_contact": {"type": "boolean"},
+         "note": {"type": "string", "description": "до 500 символів; зберігається фактом про людину"},
+     }, ["contact"]), "annotations": _WRITE},
     # ── синк із чек-листом (профіль sync); відповіді — JSON ──
     {"name": "crm_upsert_task", "title": "Задача з джерела",
      "description": "Створює або оновлює задачу за (source, external_id); повторний виклик не створює дубля. Відповідь JSON {uid, created, status[, conflict]}. conflict=done_on_server — задачу закрили тут, закрий картку. Закрити з джерела — status=done.",
@@ -1075,15 +1174,17 @@ HANDLERS = {
     "crm_record_checkin_review": record_checkin_review,
     "crm_get_week_block": get_week_block,
     "crm_send_owner_message": send_owner_message,
+    "crm_update_contact": update_contact,
     "crm_upsert_task": upsert_task,
     "crm_list_task_changes": list_task_changes,
     "crm_link_task": link_task,
     "crm_close_missing": close_missing,
 }
 
-#: Профілі для фонового воркера: `?profile=<name>` у адресі MCP обмежує
-#: tools/list до кількох інструментів — менше схем у контексті, менше квоти.
-#: Невідомий профіль (або без нього — інтерактивний Claude) = усі інструменти.
+#: Профілі для фонових задач: `?profile=<name>` у адресі MCP обмежує
+#: tools/list рівно цим списком — менше схем у контексті, менше квоти.
+#: Без профілю (або з невідомим) — звичайний набір для розмов із Claude:
+#: усі інструменти, крім BACKGROUND_ONLY (див. tools_for).
 PROFILES: dict[str, list[str]] = {
     "reply": ["crm_get_pending_reply", "crm_get_owner_voice", "crm_get_contact_memory", "crm_fill_reply_draft"],
     "inbox": ["crm_list_untriaged_emails", "crm_triage_email", "crm_get_email", "crm_get_contact_memory",
@@ -1093,24 +1194,22 @@ PROFILES: dict[str, list[str]] = {
                "crm_mark_posts_processed"],
     "coach": ["crm_get_pending_coach_question", "crm_set_coach_question", "crm_get_checkin_to_review",
               "crm_record_checkin_review", "crm_get_week_block", "crm_send_owner_message", "crm_list_goals"],
-    # Синк із чек-листом Claude: запланована задача бачить лише це (docs/CLAUDE_CHECKLIST.md).
+    # Синк із чек-листом Claude (docs/CLAUDE_CHECKLIST.md). Окремий конектор
+    # із цим профілем не потрібен: усі шість є і в звичайному наборі.
     "sync": ["crm_upsert_task", "crm_list_task_changes", "crm_link_task", "crm_close_missing",
              "crm_complete_task", "crm_send_owner_message"],
 }
 
-
-#: Інструменти лише для фонових профілів: у розмові з людиною вони зайві
-#: (там питання ставить не система, а власник), тож у tools/list без профілю
-#: їх немає — інтерактивний Claude бачить компактний набір.
+#: Інструменти фонових профілів, яких немає в звичайному наборі: у розмові з
+#: людиною вони зайві (питання там ставить власник, а не система). Звичайний
+#: набір = усі TOOLS мінус це. Один конектор для розмов і запланованих задач
+#: Claude (рішення власника 15.10): весь профіль sync лишається видимим.
 BACKGROUND_ONLY: frozenset[str] = frozenset(
     name for names in PROFILES.values() for name in names
 ) - {
     "crm_get_owner_voice", "crm_get_contact_memory", "crm_get_email", "crm_save_email_draft",
-    "crm_add_fact", "crm_list_goals", "crm_complete_task",
-    # Синк із чек-листом — і в звичайному наборі: запланована задача Claude
-    # ходить тим самим конектором, що й розмови (рішення власника 15.10).
-    "crm_upsert_task", "crm_list_task_changes", "crm_link_task", "crm_close_missing",
-}
+    "crm_add_fact", "crm_list_goals",
+} - set(PROFILES["sync"])
 
 
 def tools_for(profile: str | None) -> list[dict]:

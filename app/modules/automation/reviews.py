@@ -243,6 +243,8 @@ def run_midday_checkin() -> bool:
     from app.modules.tasks import nudges
 
     with SessionLocal() as db:
+        if nudges.quiet_now(db):  # тиша — для всього проактивного (TASK-02)
+            return False
         text = midday_checkin_text(db)
         # Строки сьогодні й прострочені — тим самим повідомленням, одним блоком.
         deadlines = nudges.deadlines_block(db)
@@ -263,7 +265,11 @@ def run_weekly_review() -> bool:
         return False
     from app.modules.automation import telegram
 
+    from app.modules.tasks import nudges
+
     with SessionLocal() as db:
+        if nudges.quiet_now(db):
+            return False
         text = full_review_text(db)
     return telegram.send_message(text, reply_markup=_QUEUE_BUTTON)
 
@@ -356,7 +362,11 @@ def run_weekly_reflection() -> bool:
         return False
     from app.modules.automation import telegram
 
+    from app.modules.tasks import nudges
+
     with SessionLocal() as db:
+        if nudges.quiet_now(db):
+            return False
         contacts = pick_reflection_contacts(db, settings.reflection_count)
         text = reflection_text(db, contacts)
     if not text:

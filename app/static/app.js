@@ -922,6 +922,10 @@ async function openReminderSettings() {
       <label>Тиша з<input name="quiet_from" pattern="[0-2][0-9]:[0-5][0-9]" value="${esc(cfg.quiet_from)}" /></label>
       <label>до<input name="quiet_to" pattern="[0-2][0-9]:[0-5][0-9]" value="${esc(cfg.quiet_to)}" /></label>
       <label>Не більше повідомлень на день<input type="number" name="daily_cap" min="0" max="50" value="${cfg.daily_cap}" /></label>
+      <p class="muted form-full">Тиша ${esc(cfg.quiet_from)}–${esc(cfg.quiet_to)}: уночі не пише ніхто, крім брифу перед зустріччю до 08:30;
+        пропозиції задач і повідомлення від Claude чекають ранкового плану${cfg.held_count ? ` (зараз чекає ${cfg.held_count})` : ""}.
+        Ліміт рахує лише пропозиції задач і пінги (блокери, ворота, термінове від Claude): сьогодні ${cfg.sent_today} з ${cfg.daily_cap}.
+        Коуч, брифи, ранковий план і денна звірка в ліміт не входять.</p>
       <label class="form-full">Задачі з переписки в Telegram<select name="tg_suggest_mode">${
         Object.entries(modes).map(([k, v]) => goalOpt(k, v, cfg.tg_suggest_mode)).join("")}</select></label>
     </div>

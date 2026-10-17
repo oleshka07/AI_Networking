@@ -31,10 +31,12 @@ def test_sync_profile_lists_exactly_the_sync_tools():
     assert names == {"crm_upsert_task", "crm_list_task_changes", "crm_link_task",
                      "crm_close_missing", "crm_complete_task", "crm_send_owner_message"}
     interactive = {t["name"] for t in tools.tools_for(None)}
-    # Синк видно і без профілю: запланована задача ходить звичайним конектором.
-    assert {"crm_upsert_task", "crm_list_task_changes", "crm_link_task",
-            "crm_close_missing", "crm_complete_task"} <= interactive
-    assert "crm_send_owner_message" not in interactive  # фонове лишається фоновим
+    # Один конектор (TASK-02): увесь профіль sync видно і без профілю.
+    assert names <= interactive
+    assert "crm_update_contact" in interactive
+    # Решта фонових профілів — лише за ?profile=.
+    assert "crm_get_pending_reply" not in interactive
+    assert "crm_set_coach_question" not in interactive
 
 
 def test_upsert_twice_is_one_task(db):

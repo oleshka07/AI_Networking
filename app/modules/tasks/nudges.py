@@ -7,8 +7,11 @@
 - **Строки** — строк сьогодні або прострочений: одним блоком у денній звірці.
 - **Підготовка** — напередодні ввечері задача «Підготуватися: …» з брифом на
   кожну завтрашню зустріч із зовнішніми учасниками.
-- **Тиша** — вночі нічого, крім брифу перед зустріччю; денна стеля
-  проактивних повідомлень.
+- **Тиша** — вночі нічого проактивного: коуч, пінги, звірка, нагадування
+  мовчать; бриф — лише перед ранньою зустріччю (до 08:30); пропозиції задач і
+  повідомлення від Claude чекають ранку в ``held_messages`` (``quiet.py``).
+- **Денна стеля** — лише для пропозицій задач і пінгів (блокери, ворота,
+  ``urgent`` від Claude).
 
 Години й прапорці — у ``task_settings`` (сторінка «Нагадування» на сайті),
 тож зміна розкладу не потребує перезапуску контейнера.
@@ -91,15 +94,24 @@ def _reset_day(cfg: TaskSettings, local_now: datetime) -> None:
         cfg.sent_count = 0
 
 
-def allow_proactive(db: Session, local_now: datetime | None = None) -> bool:
-    """Можна надіслати ще одне проактивне повідомлення? Так — і воно пораховане.
+def quiet_now(db: Session, local_now: datetime | None = None) -> bool:
+    """Чи зараз години тиші — для всього проактивного (коуч, брифи, звірка…)."""
+    return in_quiet(get_settings(db), local_now or _local_now())
+
+
+def allow_proactive(db: Session, local_now: datetime | None = None, *,
+                    ignore_quiet: bool = False) -> bool:
+    """Можна надіслати ще одне повідомлення під денну стелю? Так — і воно пораховане.
 
     Ні — у години тиші або коли денна стеля вичерпана. Нагадування, що
-    приходить постійно, перестають помічати; краще промовчати.
+    приходить постійно, перестають помічати; краще промовчати. У стелю йдуть
+    лише пропозиції задач і пінги (блокери, ворота, ``urgent`` від Claude);
+    коуч, брифи, ранковий план і денна звірка — ні. ``ignore_quiet`` — для
+    ``urgent``: тишу він обходить, а стелю — ні.
     """
     local_now = local_now or _local_now()
     cfg = get_settings(db)
-    if in_quiet(cfg, local_now):
+    if not ignore_quiet and in_quiet(cfg, local_now):
         return False
     _reset_day(cfg, local_now)
     if cfg.sent_count >= max(0, cfg.daily_cap):
@@ -111,12 +123,18 @@ def allow_proactive(db: Session, local_now: datetime | None = None) -> bool:
 
 
 def count_proactive(db: Session, local_now: datetime | None = None) -> None:
-    """Рахує повідомлення, яке йде за своїм розкладом (ранковий план) — у стелю."""
+    """Рахує в стелю те, що однаково йде (блок «За ніч» у ранковому плані = 1)."""
     local_now = local_now or _local_now()
     cfg = get_settings(db)
     _reset_day(cfg, local_now)
     cfg.sent_count += 1
     db.commit()
+
+
+def sent_today(cfg: TaskSettings, local_now: datetime | None = None) -> int:
+    """Скільки повідомлень під стелею вже пішло сьогодні — для сторінки «Нагадування»."""
+    day = (local_now or _local_now()).date().isoformat()
+    return cfg.sent_count if cfg.sent_day == day else 0
 
 
 # ── Кнопки ──────────────────────────────────────────────────────────────────
@@ -458,14 +476,17 @@ def prep_message(tasks: list[Task]) -> tuple[str, dict]:
 
 def run_prep(db: Session, *, local_now: datetime | None = None,
              events: list[dict] | None = None) -> list[Task]:
-    """Створює задачі підготовки на завтра; повідомлення — якщо дозволяють тиша й стеля."""
+    """Створює задачі підготовки на завтра; повідомлення — якщо не години тиші.
+
+    У денну стелю не йде: це підготовка до зустрічей, як і бриф, а не пінг.
+    """
     local_now = local_now or _local_now()
     tomorrow = local_now.date() + timedelta(days=1)
     if events is None:
         start, end = _local_day_bounds(tomorrow)
         events = _events_between(db, max(start, _now()), end)
     created = create_prep_tasks(db, events, tomorrow)
-    if created and _configured() and allow_proactive(db, local_now):
+    if created and _configured() and not quiet_now(db, local_now):
         from app.modules.automation import telegram
 
         text, markup = prep_message(created)
