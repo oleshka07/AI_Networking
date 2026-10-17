@@ -134,24 +134,35 @@ def run_daily_job(send_digest: bool = True) -> dict:
                 plan = nudges.plan_block(db)
             except Exception as exc:  # pragma: no cover - план не валить прогін
                 logger.warning("morning plan failed: %s", exc)
+            # Що чекало кінця тиші: «Від Claude» і «За ніч» — першими блоками.
+            from app.modules.tasks import quiet
+
+            held = quiet.has_pending(db)
             quiet_digest = settings.digest_quiet_when_empty and nothing_to_say
-            if quiet_digest and not plan:
+            if quiet_digest and not plan and not held:
                 summary["telegram_skipped"] = "quiet (nothing actionable)"
             elif settings.telegram_configured and settings.telegram_chat_id:
                 parts, rows = [], []
+                owner_text = night_text = None
+                stamp = quiet.utcnow()
+                if held:
+                    owner_text, night_text, night_rows = quiet.morning_blocks(db, now=stamp)
+                    summary["held_released"] = True
                 if plan:
                     plan_text, plan_tasks = plan
                     parts.append(plan_text)
                     rows += nudges.task_keyboard_rows(plan_tasks)
-                    nudges.count_proactive(db)
                     summary["plan_tasks"] = len(plan_tasks)
+                if night_text:
+                    parts.append(night_text)
+                    rows += night_rows
                 if not quiet_digest:
                     parts.append(telegram.digest_text(data))
                     rows.append([{"text": "🚀 Почати обхід", "callback_data": "q:start"}])
-                summary["telegram_sent"] = telegram.send_message(
-                    "\n\n".join(parts),
-                    reply_markup={"inline_keyboard": rows},
-                )
+                summary["telegram_sent"] = quiet.send_blocks(telegram, parts, rows, head=owner_text)
+                if held and not summary["telegram_sent"]:
+                    quiet.restore(db, stamp)  # Telegram не прийняв — черга чекає наступної спроби
+                    summary["held_released"] = False
         logger.info("Daily job finished: %s", summary)
     finally:
         db.close()

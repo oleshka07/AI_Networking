@@ -405,6 +405,81 @@ def mark(db: Session, draft: TelegramDraft, status: DraftStatus) -> None:
     db.commit()
 
 
+#: Telegram Business дає боту писати від імені власника лише в чат, де було
+#: вхідне повідомлення за останні стільки годин (``can_reply`` у Bot API).
+REPLY_WINDOW_HOURS = 24
+
+
+def can_reply(db: Session, contact: Contact, now: datetime | None = None) -> bool:
+    """Чи бот зможе надіслати від імені власника: вхідне в Telegram за 24 год."""
+    from datetime import timedelta
+
+    from app.modules.interactions.models import Interaction
+
+    last = db.scalars(
+        select(Interaction.occurred_at)
+        .where(
+            Interaction.contact_id == contact.id,
+            Interaction.direction == Direction.inbound,
+            Interaction.source == "telegram",
+        )
+        .order_by(Interaction.occurred_at.desc())
+        .limit(1)
+    ).first()
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - last < timedelta(hours=REPLY_WINDOW_HOURS)
+
+
+def chat_url(contact: Contact, chat_id: int | None = None) -> str | None:
+    """Посилання, що відкриває чат: t.me/<username>, інакше tg://user?id=<id>."""
+    handle = (contact.telegram or "").strip().lstrip("@")
+    if handle and " " not in handle and "://" not in handle and "/" not in handle:
+        return f"https://t.me/{handle}"
+    chat = chat_id or contact.telegram_chat_id
+    return f"tg://user?id={chat}" if chat else None
+
+
+def mark_sent_manually(db: Session, draft: TelegramDraft) -> None:
+    """«Надіслав сам»: текст іде в історію (як crm_log_interaction), чернетка закрита.
+
+    Якщо Business-зʼєднання вже принесло цей вихідний (власник писав із
+    телефона), другого запису не робимо.
+    """
+    contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
+    if contact is not None:
+        since = draft.created_at
+        if since is not None and since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        seen = [
+            i for i in contact.interactions
+            if i.direction == Direction.outbound and i.source == "telegram"
+            and since is not None
+            and (i.occurred_at if i.occurred_at.tzinfo else i.occurred_at.replace(tzinfo=timezone.utc)) >= since
+        ]
+        external_id = f"tgb:{draft.chat_id}:own:{draft.id}"
+        if not seen and not interactions_service.interaction_exists(db, contact.id, external_id):
+            interactions_service.add_synced_interaction(
+                db,
+                contact,
+                occurred_at=datetime.now(timezone.utc),
+                channel=Channel.message,
+                direction=Direction.outbound,
+                summary=draft.draft_text[:300],
+                source="telegram",
+                external_id=external_id,
+            )
+            db.refresh(contact)
+            warmth.refresh(contact)
+            db.commit()
+        from app.modules.automation import reminders as _reminders
+
+        _reminders.complete_for_contact(db, contact.id)
+    mark(db, draft, DraftStatus.sent)
+
+
 def approve_and_send(db: Session, client, draft: TelegramDraft) -> bool:
     """Send the draft to the contact via the business connection (as the
     user), log the outgoing interaction, refresh warmth."""

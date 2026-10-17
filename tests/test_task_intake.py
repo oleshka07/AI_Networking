@@ -240,7 +240,10 @@ def test_delegate_makes_draft_and_expectation(client, admin):
                     "text": "попроси Марію надіслати рахунок до пʼятниці"}})
     card = fake.sent[-1]
     assert "чернетка прохання" in card["text"] and "Марія, прохання: надіслати рахунок" in card["text"]
-    assert card["reply_markup"]["inline_keyboard"][0][0]["text"] == "✅ Надіслати"
+    # Марія ще не писала за 24 год — бот від імені власника сюди не напише.
+    buttons = [b["text"] for row in card["reply_markup"]["inline_keyboard"] for b in row]
+    assert buttons[:2] == ["🔗 Відкрити чат", "📋 Скопіювати текст"]
+    assert "✅ Надіслати" not in buttons
 
     from app.core.database import SessionLocal
     from app.modules.tasks.models import Task, TaskKind

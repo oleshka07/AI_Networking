@@ -135,6 +135,10 @@ class TaskSettingsOut(BaseModel):
     quiet_from: str
     quiet_to: str
     daily_cap: int
+    # Скільки повідомлень під стелею вже пішло сьогодні (пропозиції, пінги, urgent).
+    sent_today: int = 0
+    # Що чекає кінця тиші: пропозиції задач і повідомлення від Claude.
+    held_count: int = 0
     tg_suggest_mode: str
     sync: SyncStatusOut | None = None
 

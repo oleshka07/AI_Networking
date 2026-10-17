@@ -58,6 +58,10 @@ def _settings_out(db: Session) -> TaskSettingsOut:
 
     row = external.get_settings(db)
     out = TaskSettingsOut.model_validate(row)
+    from . import nudges, quiet
+
+    out.sent_today = nudges.sent_today(row)
+    out.held_count = quiet.pending_count(db)
     out.sync = SyncStatusOut(
         last_at=row.sync_last_at, last_tool=row.sync_last_tool,
         error=row.sync_error, error_at=row.sync_error_at,

@@ -83,7 +83,37 @@ def _admin_id() -> int | None:
 # ── Preview rendering ────────────────────────────────────────────────────────
 
 
-def _draft_keyboard(draft_id: int, has_draft: bool, outreach: bool = False) -> dict:
+#: CopyTextButton у Bot API бере 1–256 символів; довший текст копіюють з картки.
+_COPY_TEXT_MAX = 256
+
+
+def _draft_keyboard(draft_id: int, has_draft: bool, outreach: bool = False,
+                    cold: dict | None = None) -> dict:
+    """Кнопки картки чернетки.
+
+    ``cold`` — чат без вхідного за 24 год: бот туди писати не може, тож замість
+    «✅ Надіслати» — «🔗 Відкрити чат», «📋 Скопіювати текст» і «✔ Надіслав сам».
+    """
+    if cold is not None:
+        open_row = []
+        if cold.get("url"):
+            open_row.append({"text": "🔗 Відкрити чат", "url": cold["url"]})
+        text = (cold.get("text") or "").strip()
+        if has_draft and 0 < len(text) <= _COPY_TEXT_MAX:
+            open_row.append({"text": "📋 Скопіювати текст", "copy_text": {"text": text}})
+        done_row = [
+            {"text": "✔ Надіслав сам", "callback_data": f"d:o:{draft_id}"},
+            {"text": "⏭ Пропустити", "callback_data": f"d:k:{draft_id}"},
+        ]
+        rows = [open_row, done_row] if open_row else [done_row]
+        extra = []
+        if has_draft:
+            extra.append({"text": "🌐 Переклад", "callback_data": f"d:t:{draft_id}"})
+        if outreach:
+            extra.append({"text": "🚫 Стоп-лист", "callback_data": f"d:x:{draft_id}"})
+        if extra:
+            rows.append(extra)
+        return {"inline_keyboard": rows}
     row1 = []
     if has_draft:
         row1.append({"text": "✅ Надіслати", "callback_data": f"d:s:{draft_id}"})
@@ -99,6 +129,44 @@ def _draft_keyboard(draft_id: int, has_draft: bool, outreach: bool = False) -> d
         # Reply cards: let the user switch this person to manual replies.
         row2.append({"text": "🔕 Пауза", "callback_data": f"d:p:{draft_id}"})
     return {"inline_keyboard": [row1, row2] if row2 else [row1]}
+
+
+def _cold_chat(db, draft) -> dict | None:
+    """``None`` — бот може надіслати сам; інакше куди відкрити чат і що скопіювати."""
+    contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
+    if contact is None or service.can_reply(db, contact):
+        return None
+    return {"url": service.chat_url(contact, draft.chat_id), "text": draft.draft_text}
+
+
+def draft_keyboard_for(db, draft) -> dict:
+    """Клавіатура картки з урахуванням вікна 24 год Telegram Business."""
+    from .models import DraftKind as _Kind
+
+    return _draft_keyboard(
+        draft.id, bool((draft.draft_text or "").strip()),
+        outreach=draft.kind == _Kind.outreach, cold=_cold_chat(db, draft),
+    )
+
+
+def send_draft_card(client_send, db, draft, text: str):
+    """Надсилає картку; ``tg://`` у кнопці Telegram може відхилити (приватність
+    людини) — тоді ще раз без «Відкрити чат», щоб картка не загубилась.
+
+    ``client_send(text, reply_markup)`` повертає message_id або None.
+    """
+    kb = draft_keyboard_for(db, draft)
+    message_id = client_send(text, kb)
+    if message_id is None and any(
+        str(b.get("url", "")).startswith("tg://") for row in kb["inline_keyboard"] for b in row
+    ):
+        kb = {"inline_keyboard": [
+            [b for b in row if not str(b.get("url", "")).startswith("tg://")]
+            for row in kb["inline_keyboard"]
+        ]}
+        kb["inline_keyboard"] = [row for row in kb["inline_keyboard"] if row]
+        message_id = client_send(text, kb)
+    return message_id
 
 
 def _paused_notice(contact, text: str) -> str:
@@ -291,15 +359,14 @@ def _send_next_outreach_card(client, db, admin: int) -> bool:
         except Exception as exc:  # pragma: no cover
             logger.warning("enrich failed for %s: %s", contact.id, exc)
     draft = service.create_outreach_draft(db, contact, connection, reason)
-    sent = client.send_message(
-        admin,
-        _outreach_card(contact, draft),
-        reply_markup=_draft_keyboard(
-            draft.id, bool(draft.draft_text.strip()), outreach=True
-        ),
-    )
-    if sent:
-        service.set_admin_message(db, draft, sent.get("message_id", 0))
+
+    def _send(text, kb):
+        sent = client.send_message(admin, text, reply_markup=kb)
+        return (sent or {}).get("message_id") if sent else None
+
+    message_id = send_draft_card(_send, db, draft, _outreach_card(contact, draft))
+    if message_id:
+        service.set_admin_message(db, draft, message_id)
     return True
 
 
@@ -464,6 +531,11 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
                     task_btn = task_intake.task_button(
                         found, chat_id, msg.get("message_id"), outgoing=False
                     )
+            if admin and (flags or task_btn) and _hold_paused_for_morning(
+                db, name=name, chat_id=chat_id, message_id=msg.get("message_id"),
+                text=text, flags=flags, found=found,
+            ):
+                return
             if admin and (flags or task_btn):
                 held = service.create_held_reply_draft(
                     db, contact, chat_id=chat_id, text=text,
@@ -494,6 +566,32 @@ def handle_business_message(client, msg: dict, *, alisio_handled: bool = False) 
         client, admin, name=name, chat_id=chat_id,
         message_id=msg.get("message_id"), text=text, outgoing=False,
     )
+
+
+def _hold_paused_for_morning(db, *, name, chat_id, message_id, text, flags, found) -> bool:
+    """Уночі картка «🔕 ти відповідаєш сам» з кнопками не будить власника.
+
+    Те, на що вона пропонувала діяти (задача, зустріч), чекає ранкового плану
+    в блоці «За ніч» з тими самими ➕ / 📅 / ✖. True — притримали.
+    """
+    from app.modules.tasks import intake, nudges, quiet
+
+    if not nudges.quiet_now(db):
+        return False
+    meeting = "meeting" in flags or (found or {}).get("type") == "meeting"
+    from app.modules.tasks import service as tasks_service
+
+    if not meeting and tasks_service.find_external(
+        db, "telegram", quiet.suggestion_ref(chat_id, message_id)
+    ):
+        return True  # режим auto вже створив задачу — пропонувати нічого
+    ctype = (found or {}).get("type") or ("meeting" if meeting else "request")
+    quiet.hold_suggestion(
+        db, chat_id=chat_id, message_id=message_id, name=name,
+        kind=intake.kind_for(ctype, outgoing=False), commitment_type=ctype,
+        outgoing=False, due=(found or {}).get("due"), meeting=meeting, text=text,
+    )
+    return True
 
 
 def _handle_task_callback(client, cb_id: str, data: str, admin: int | None) -> None:
@@ -571,6 +669,12 @@ def handle_callback(client, cb: dict) -> None:
         from . import task_intake
 
         task_intake.handle_callback(client, cb_id, data, admin, msg)
+        return
+
+    if data.startswith("tn:"):
+        from app.modules.tasks import quiet
+
+        quiet.handle_callback(client, cb_id, data, admin, msg)
         return
 
     if data.startswith("dg:"):
@@ -666,7 +770,7 @@ def handle_callback(client, cb: dict) -> None:
                     msg["chat"]["id"],
                     msg["message_id"],
                     _render_draft(contact, draft),
-                    reply_markup=_draft_keyboard(draft.id, bool(new_text.strip())),
+                    reply_markup=draft_keyboard_for(db, draft),
                 )
             return
         if action == "cal":  # add the incoming message's meeting to the calendar
@@ -720,7 +824,7 @@ def handle_callback(client, cb: dict) -> None:
                         reply_markup=_translate_keyboard(draft.id),
                     )
                 return
-            kb = _draft_keyboard(draft.id, True, outreach=is_outreach)
+            kb = draft_keyboard_for(db, draft)
             if arg == "back":
                 client.answer_callback(cb_id)
                 if msg:
@@ -738,6 +842,7 @@ def handle_callback(client, cb: dict) -> None:
                 client.answer_callback(cb_id, "Не вдалося перекласти")
                 return
             service.update_draft_text(db, draft, translated)
+            kb = draft_keyboard_for(db, draft)  # «Скопіювати» — уже перекладений текст
             client.answer_callback(cb_id, "Перекладено")
             if msg:
                 client.edit_message_text(
@@ -759,7 +864,13 @@ def handle_callback(client, cb: dict) -> None:
                 _send_next_outreach_card(client, db, admin)
             return
 
-        if action == "s":
+        if action == "o":  # «Надіслав сам» — у чат без вхідного за 24 год
+            service.mark_sent_manually(db, draft)
+            client.answer_callback(cb_id, "✔ Записав у історію")
+            if msg:
+                client.delete_message(msg["chat"]["id"], msg["message_id"])
+            handled = True
+        elif action == "s":
             ok = service.approve_and_send(db, client, draft)
             client.answer_callback(cb_id, "Надіслано ✅" if ok else "Помилка надсилання")
             if ok and msg:
@@ -831,9 +942,7 @@ def handle_admin_message(client, msg: dict) -> None:
                 client.send_message(admin, "Не вдалося переписати чернетку.")
                 return
             contact = db.get(Contact, draft.contact_id)
-            from .models import DraftKind as _DK
-
-            kb = _draft_keyboard(draft.id, True, outreach=draft.kind == _DK.outreach)
+            kb = draft_keyboard_for(db, draft)
             edited = client.edit_message_text(
                 admin,
                 reply_to,

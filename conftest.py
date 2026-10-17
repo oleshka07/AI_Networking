@@ -42,3 +42,22 @@ def db():
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture(autouse=True)
+def _daytime_clock(monkeypatch):
+    """Тиша (22:30–07:30) залежить від годинника; тести за замовчуванням — опівдні.
+
+    Тест, якому потрібна ніч, ставить свій час тим самим monkeypatch.
+    ``QUIET_TEST_HOUR`` — прогнати весь набір в іншу годину (перевірка, що
+    жоден тест не залежить від справжнього часу).
+    """
+    from datetime import datetime
+
+    from app.modules.tasks import nudges, quiet
+
+    hour = int(os.environ.get("QUIET_TEST_HOUR", "12"))
+    fixed = datetime.now().replace(hour=hour, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(nudges, "_local_now", lambda: fixed)
+    monkeypatch.setattr(quiet, "_local_now", lambda: fixed)
+    return fixed

@@ -7,6 +7,8 @@
   кнопками «➕ Задача», «📅 У календар», «✖». Не частіше разу на годину на
   чат; у чатах, які веде ALiSiO, — нічого. Режим ``task_settings.tg_suggest_mode``:
   ``suggest`` (типово) / ``auto`` (задача одразу, без повідомлення) / ``off``.
+  Пропозиція йде в денну стелю; у години тиші (або коли стеля вичерпана) вона
+  чекає ранкового плану, блок «За ніч» (``tasks/quiet.py``).
 - **Задача з повідомлення.** ``source='telegram'``, ``external_id='tgb:<chat>:<msg>'``,
   строк із тексту, у нотатках до 300 символів цитати. Повторне натискання
   не створює другої: дедуп за (source, external_id).
@@ -152,7 +154,7 @@ def maybe_suggest(client, admin: int | None, *, name: str | None, chat_id, messa
     if not admin or not text or chat_id is None:
         return False
     try:
-        from app.modules.tasks import intake, nudges
+        from app.modules.tasks import intake, nudges, quiet
 
         found = found or detect(text)
         if found is None:
@@ -171,8 +173,18 @@ def maybe_suggest(client, admin: int | None, *, name: str | None, chat_id, messa
                 return True
             if not _rate_ok(chat_id):
                 return False
-            # Уночі — без звуку: пропозиція лягає, але не будить.
-            quiet = nudges.in_quiet(nudges.get_settings(db))
+            if quiet.already_suggested(db, quiet.suggestion_ref(chat_id, message_id)):
+                return False
+            # Уночі — до ранкового плану («За ніч»); стеля вичерпана — теж туди:
+            # обіцянка не має загубитись через те, що день був гучний.
+            if not nudges.allow_proactive(db):
+                quiet.hold_suggestion(
+                    db, chat_id=chat_id, message_id=message_id, name=name, kind=kind,
+                    commitment_type=found["type"], outgoing=outgoing, due=found.get("due"),
+                    meeting=found["type"] == "meeting", text=text,
+                )
+                _remember(chat_id)
+                return True
         due = found.get("due")
         bits = [f"👤 {_esc(name or 'контакт')}", _KIND_LABEL.get(kind, kind)]
         if due:
@@ -186,10 +198,11 @@ def maybe_suggest(client, admin: int | None, *, name: str | None, chat_id, messa
         sent = client.send_message(
             admin, msg,
             reply_markup=_suggest_keyboard(kind, chat_id, message_id, found["type"] == "meeting"),
-            silent=quiet,
         )
         if sent is not None:
             _remember(chat_id)
+            with SessionLocal() as db:
+                quiet.mark_suggested(db, chat_id, message_id)
         return True
     except Exception as exc:  # pragma: no cover - не валимо потік повідомлень
         logger.warning("task suggestion failed: %s", exc)
@@ -299,7 +312,7 @@ def delegate(client, admin: int, db, contact: Contact, what: str, due: date | No
     from app.modules.tasks.models import Task, TaskKind
 
     from . import service
-    from .handlers import _draft_keyboard
+    from .handlers import send_draft_card
     from .models import DraftKind, DraftStatus, TelegramDraft
 
     task = Task(
@@ -336,13 +349,17 @@ def delegate(client, admin: int, db, contact: Contact, what: str, due: date | No
     db.add(draft)
     db.commit()
     db.refresh(draft)
-    sent = client.send_message(
-        admin,
+    def _send(card, kb):
+        sent = client.send_message(admin, card, reply_markup=kb)
+        return (sent or {}).get("message_id") if sent else None
+
+    # Чат без вхідного за 24 год — «Відкрити чат» і «Скопіювати» замість «Надіслати».
+    message_id = send_draft_card(
+        _send, db, draft,
         f"{head}\n\n✍️ <b>{_esc(contact.full_name)}</b> — чернетка прохання\n\n{_esc(text)}",
-        reply_markup=_draft_keyboard(draft.id, True, outreach=True),
     )
-    if sent:
-        service.set_admin_message(db, draft, sent.get("message_id", 0))
+    if message_id:
+        service.set_admin_message(db, draft, message_id)
 
 
 def handle_delegate(client, admin: int, text: str) -> bool:
